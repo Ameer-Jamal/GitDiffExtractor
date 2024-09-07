@@ -204,6 +204,7 @@ class GitDiffExtractor(QWidget):
         query = self.search_input.text().lower()
         filtered_prs = [pr for pr in self.prs if query in pr.lower()]
         self.pr_list.clear()
+        commit_hash_regex = r'\b[0-9a-f]{7,40}\b'
 
         for pr in filtered_prs:
             if pr.strip():
