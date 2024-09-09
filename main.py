@@ -1,19 +1,15 @@
 import os
-import subprocess
 import platform
+import re
 import shutil
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
-                             QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QTextEdit, QListWidget,
-                             QListWidgetItem, QTextBrowser)
+import subprocess
+
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QTextCursor, QTextDocument
-import pygments
-from pygments.lexers import DiffLexer
-from pygments.formatters import HtmlFormatter
-from pygments.formatters.terminal import TerminalFormatter  # For plain text
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
+                             QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
+                             QListWidgetItem)
 
 from ConfigManager import ConfigManager
-import re
 
 
 class GitDiffExtractor(QWidget):
