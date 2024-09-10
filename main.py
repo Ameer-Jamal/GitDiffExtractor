@@ -7,25 +7,46 @@ import subprocess
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
-                             QListWidgetItem)
+                             QListWidgetItem, QTabWidget)
 
+from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
+
+#CONSTS:
+INPUT_ERROR = "Input Error"
 
 
 class GitDiffExtractor(QWidget):
+
     def __init__(self):
         super().__init__()
         # Initialize the ConfigManager
-        self.config_manager = ConfigManager();
-        self.default_output_dir = "/Users/ajamal/Documents/GitDiffs"
+        self.config_manager = ConfigManager()
+        self.default_output_dir = self.config_manager.get_output_dir();
         self.prs = []  # List to hold PRs
+        # Initialize the QTabWidget
+        self.tabs = QTabWidget()
+
+        # Create the PR Diff Extractor UI and Branch Commit Viewer UI as separate widgets
         self.initUI()
+
+        # Add both tabs to the QTabWidget
+        self.tabs.addTab(self.prExtractDiffWidget(), "PR Diff Extractor")  # Default tab
+        self.tabs.addTab(BranchCommitViewer(), "Branch Commit Viewer")
+
+        # Set the layout for the main window
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.tabs)
+        self.setLayout(main_layout)
 
     def initUI(self):
         self.setWindowTitle('Git Diff Extractor')
         self.setGeometry(100, 100, 500, 600)
 
-        layout = QVBoxLayout()
+    def prExtractDiffWidget(self):
+        """Create the widget for PR Extract Diff functionality."""
+        pr_widget = QWidget()
+        layout = QVBoxLayout(pr_widget)
 
         # Repository Directory
         repo_layout = QHBoxLayout()
@@ -59,11 +80,6 @@ class GitDiffExtractor(QWidget):
         output_layout.addWidget(self.output_button)
         layout.addLayout(output_layout)
 
-        # Generate Diff Button
-        self.run_button = QPushButton('Generate Diff', self)
-        self.run_button.clicked.connect(self.generateDiff)
-        layout.addWidget(self.run_button)
-
         # Search Bar for PRs
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("Search PRs")
@@ -80,7 +96,47 @@ class GitDiffExtractor(QWidget):
         self.pr_button.clicked.connect(self.listPRs)
         layout.addWidget(self.pr_button)
 
-        self.setLayout(layout)
+        # Generate Diff Button
+        self.run_button = QPushButton('Generate Diff', self)
+        self.run_button.clicked.connect(self.generateDiff)
+        layout.addWidget(self.run_button)
+
+        pr_widget.setLayout(layout)  # Set the layout for the pr_widget
+        return pr_widget
+    def getPRDiffs(self):
+        repo_dir = self.repo_input.text()
+        pr_merge_commit = self.commit_input.text().strip()
+        output_dir = self.output_input.text()
+
+        if not repo_dir or not pr_merge_commit or not output_dir:
+            QMessageBox.warning(self, INPUT_ERROR, "All fields must be filled out.")
+            return
+
+        try:
+            os.chdir(repo_dir)
+
+            # Get all commits related to the PR (before the merge commit)
+            result = subprocess.run(['git', 'log', '--pretty=%H', f'{pr_merge_commit}^1'],
+                                    capture_output=True, text=True)
+            commit_hashes = result.stdout.strip().split()
+
+            if not commit_hashes:
+                QMessageBox.warning(self, "Error",
+                                    f"No commits found for the specified merge commit {pr_merge_commit}.")
+                return
+
+            # Generate diffs for each commit related to the PR
+            for commit_hash in commit_hashes:
+                diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
+                with open(diff_file_path, 'w') as diff_file:
+                    # Get diff from previous commit to current commit
+                    subprocess.run(['git', 'diff', f'{commit_hash}^', commit_hash], stdout=diff_file)
+                self.openFile(diff_file_path)
+
+            QMessageBox.information(self, "Success", "Diff files created and opened.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
     def browseRepo(self):
         directory = self.selectDirectory("Select Repository Directory")
@@ -120,7 +176,7 @@ class GitDiffExtractor(QWidget):
         output_dir = self.output_input.text()
 
         if not repo_dir or not commit_hashes or not output_dir:
-            QMessageBox.warning(self, "Input Error", "All fields must be filled out.")
+            QMessageBox.warning(self, INPUT_ERROR, "All fields must be filled out.")
             return
 
         try:
@@ -153,7 +209,7 @@ class GitDiffExtractor(QWidget):
         repo_dir = self.repo_input.text()
 
         if not repo_dir:
-            QMessageBox.warning(self, "Input Error", "Repository directory must be filled out.")
+            QMessageBox.warning(self, INPUT_ERROR, "Repository directory must be filled out.")
             return
 
         try:
