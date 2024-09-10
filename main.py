@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEd
 from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
 
-#CONSTS:
+# CONSTS:
 INPUT_ERROR = "Input Error"
 
 
@@ -103,6 +103,7 @@ class GitDiffExtractor(QWidget):
 
         pr_widget.setLayout(layout)  # Set the layout for the pr_widget
         return pr_widget
+
     def getPRDiffs(self):
         repo_dir = self.repo_input.text()
         pr_merge_commit = self.commit_input.text().strip()
@@ -229,8 +230,6 @@ class GitDiffExtractor(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
-
-
 
     def displayPRs(self):
         """ Display PRs in the QListWidget with a separator. """
