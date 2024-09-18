@@ -8,7 +8,7 @@ import tempfile
 
 
 class ConfigManager:
-    def __init__(self, config_file='config.json'):
+    def __init__(self, config_file='diff_extractor_default_config.json'):
         self.config_file = config_file
         self.config = {
             "last_repo_dir": "",
