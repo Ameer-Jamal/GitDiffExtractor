@@ -248,13 +248,13 @@ class GitDiffExtractor(QWidget):
             if self.only_pr_radio.isChecked():
                 # Show only pull requests (case-insensitive grep for "pull request")
                 result = subprocess.run(['git', 'log', '--merges', '--grep=pull request'], capture_output=True,
-                                        text=True)
+                                        text=True, check=True)
             elif self.only_merges_radio.isChecked():
                 # Show only merge commits
-                result = subprocess.run(['git', 'log', '--merges'], capture_output=True, text=True)
+                result = subprocess.run(['git', 'log', '--merges'], capture_output=True, text=True, check=True)
 
             elif self.all_diffs_radio.isChecked():
-                result = subprocess.run(['git', 'log'], capture_output=True, text=True)
+                result = subprocess.run(['git', 'log'], capture_output=True, text=True, check=True)
 
             if result.returncode != 0:
                 print(f"Error: {result.stderr}")
