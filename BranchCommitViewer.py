@@ -108,7 +108,13 @@ class BranchCommitViewer(QWidget):
         base_branch = self.base_branch_input.text().strip()
         output_dir = self.config_manager.get_output_dir().strip()
 
-        if not repo_dir or not branch_name or not base_branch or not output_dir:
+        # Ensure the output directory exists, create it if it doesn't
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            QMessageBox.information(self, "Directory Created", f"Output directory created: {output_dir}")
+            output_dir = output_dir
+
+        if not repo_dir or not branch_name or not base_branch:
             QMessageBox.warning(self, "Input Error",
                                 "Repository path, base branch, branch, and output directory must be specified.")
             return
@@ -129,7 +135,7 @@ class BranchCommitViewer(QWidget):
 
             # Find the common ancestor (where the branch diverged from the base branch)
             merge_base_result = subprocess.run(['git', 'merge-base', base_branch, branch_name], capture_output=True,
-                                               text=True)
+                                           text=True)
             merge_base = merge_base_result.stdout.strip()
 
             if not merge_base:
