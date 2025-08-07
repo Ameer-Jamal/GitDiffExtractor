@@ -1,16 +1,14 @@
 import os
 import platform
 import re
-import shutil
 import subprocess
-
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
-                             QListWidgetItem, QTabWidget, QCheckBox, QRadioButton, QButtonGroup)
-
+                             QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup)
 from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
+from CreatePrTab import CreatePRTab
 
 # CONSTS:
 INPUT_ERROR = "Input Error"
@@ -41,6 +39,7 @@ class GitDiffExtractor(QWidget):
         # Add both tabs to the QTabWidget
         self.tabs.addTab(self.prExtractDiffWidget(), "PR Diff Extractor")  # Default tab
         self.tabs.addTab(BranchCommitViewer(), "Branch Commit Viewer")
+        self.tabs.addTab(CreatePRTab(self.config_manager), "Create PR")
 
         # Set the layout for the main window
         main_layout = QVBoxLayout()
@@ -211,8 +210,6 @@ class GitDiffExtractor(QWidget):
                 elif len(parents) == 2:
                     # Not a merge commit, use the single parent
                     parent1 = parents[1]
-                    QMessageBox.warning(self, "Warning",
-                                        f"The specified commit {commit_hash} is not a merge commit. Generating diff with its single parent.")
                     diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
                     with open(diff_file_path, 'w') as diff_file:
                         subprocess.run(['git', 'diff', parent1, commit_hash], stdout=diff_file)
@@ -223,7 +220,7 @@ class GitDiffExtractor(QWidget):
                     parent2 = parents[2]
                     diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
                     with open(diff_file_path, 'w') as diff_file:
-                        subprocess.run(['git', 'diff', parent1, parent2], stdout=diff_file)
+                        subprocess.run(['git', 'diff', parent1, commit_hash], stdout=diff_file)
 
                 # Open the diff file after it's generated
                 self.openFile(diff_file_path)
@@ -247,7 +244,7 @@ class GitDiffExtractor(QWidget):
             # Check which radio button is selected
             if self.only_pr_radio.isChecked():
                 # Show only pull requests (case-insensitive grep for "pull request")
-                result = subprocess.run(['git', 'log', '--merges', '--grep=pull request'], capture_output=True,
+                result = subprocess.run(['git', 'log', '--grep=pull request'], capture_output=True,
                                         text=True, check=True)
             elif self.only_merges_radio.isChecked():
                 # Show only merge commits
@@ -320,7 +317,6 @@ class GitDiffExtractor(QWidget):
             os.startfile(file_path)
         else:
             subprocess.run(['xdg-open', file_path])
-
 
 if __name__ == '__main__':
     app = QApplication([])

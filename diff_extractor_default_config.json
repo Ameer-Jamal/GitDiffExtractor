@@ -1,5 +1,8 @@
 {
     "last_repo_dir": "",
     "last_output_dir": "",
-    "origin_branch": ""
+    "origin_branch": "",
+    "bitbucket_username": "",
+    "bitbucket_app_password": "",
+    "repo_slug": ""
 }

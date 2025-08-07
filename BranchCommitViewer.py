@@ -18,7 +18,6 @@ class BranchCommitViewer(QWidget):
         self.default_output_dir = self.config_manager.get_output_dir()
         self.default_repo_dir = self.config_manager.get_repo_dir()
 
-        # Corrected conditional check
         if not self.default_repo_dir:
             self.repo_input.setPlaceholderText('Enter repository path')
         else:

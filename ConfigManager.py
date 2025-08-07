@@ -78,6 +78,26 @@ class ConfigManager:
 
     def get_origin_branch(self):
         return self.config.get("origin_branch", "")
+    def set_bitbucket_username(self, username):
+        self.config["bitbucket_username"] = username
+        self.save_config()
+
+    def get_bitbucket_username(self):
+        return self.config.get("bitbucket_username", "")
+
+    def set_bitbucket_app_password(self, pwd):
+        self.config["bitbucket_app_password"] = pwd
+        self.save_config()
+
+    def get_bitbucket_app_password(self):
+        return self.config.get("bitbucket_app_password", "")
+
+    def set_repo_slug(self, slug):
+        self.config["repo_slug"] = slug
+        self.save_config()
+
+    def get_repo_slug(self):
+        return self.config.get("repo_slug", "")
 
     def __del__(self):
         """ Ensure config is saved on application exit. """
