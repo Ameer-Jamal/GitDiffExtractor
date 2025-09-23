@@ -4,7 +4,7 @@ import os
 import subprocess
 import requests
 
-from PyQt5.QtCore    import Qt
+from PyQt5.QtCore    import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLineEdit, QPushButton, QLabel, QFileDialog, QMessageBox, QFrame
@@ -13,11 +13,12 @@ from FilterableBranchSelector import FilterableBranchSelector
 
 
 class CreatePRTab(QWidget):
+    repoChanged = pyqtSignal(str)
+
     def __init__(self, config_manager):
         super().__init__()
         self.config = config_manager
         self._build_ui()
-        self.refresh_branches()
 
     def _build_ui(self):
         # Main vertical layout
@@ -41,17 +42,21 @@ class CreatePRTab(QWidget):
         path_layout.addWidget(self.repo_input)
         path_layout.addWidget(browse_btn)
         repo_form.addRow("Repository Path:", path_layout)
+        self.repo_input.editingFinished.connect(self._handle_repo_edited)
 
         # Bitbucket credentials & slug
         self.bb_user = QLineEdit(self.config.get_bitbucket_username())
         repo_form.addRow("Username:", self.bb_user)
+        self.bb_user.editingFinished.connect(self._store_bitbucket_user)
 
         self.bb_pwd = QLineEdit(self.config.get_bitbucket_app_password())
         self.bb_pwd.setEchoMode(QLineEdit.Password)
         repo_form.addRow("App Password:", self.bb_pwd)
+        self.bb_pwd.editingFinished.connect(self._store_bitbucket_password)
 
         self.bb_slug = QLineEdit(self.config.get_repo_slug())
         repo_form.addRow("Repo Slug:", self.bb_slug)
+        self.bb_slug.editingFinished.connect(self._store_repo_slug)
 
         repo_group.setLayout(repo_form)
         main.addWidget(repo_group)
@@ -66,9 +71,11 @@ class CreatePRTab(QWidget):
 
         self.src_selector = FilterableBranchSelector(self)
         branch_form.addRow("Source Branch:", self.src_selector)
+        self.src_selector.selectionChanged.connect(self._store_source_branch)
 
         self.dst_selector = FilterableBranchSelector(self)
         branch_form.addRow("Target Branch:", self.dst_selector)
+        self.dst_selector.selectionChanged.connect(self._store_target_branch)
 
         branch_group.setLayout(branch_form)
         main.addWidget(branch_group)
@@ -83,6 +90,7 @@ class CreatePRTab(QWidget):
 
         self.pr_title = QLineEdit()
         pr_form.addRow("PR Title:", self.pr_title)
+        self.pr_title.editingFinished.connect(self._store_pr_title)
 
         pr_group.setLayout(pr_form)
         main.addWidget(pr_group)
@@ -108,14 +116,36 @@ class CreatePRTab(QWidget):
         directory = QFileDialog.getExistingDirectory(self, "Select Repository")
         if directory:
             self.repo_input.setText(directory)
-            self.config.set_repo_dir(directory)
-            self.refresh_branches()
+            self.repoChanged.emit(directory)
+
+    def _handle_repo_edited(self):
+        repo_dir = self.repo_input.text().strip()
+        self.repoChanged.emit(repo_dir)
+
+    def _store_bitbucket_user(self):
+        self.config.set_bitbucket_username(self.bb_user.text().strip())
+
+    def _store_bitbucket_password(self):
+        self.config.set_bitbucket_app_password(self.bb_pwd.text().strip())
+
+    def _store_repo_slug(self):
+        self.config.set_repo_slug(self.bb_slug.text().strip())
+
+    def _store_pr_title(self):
+        self.config.set_pr_title(self.pr_title.text().strip())
+
+    def _store_source_branch(self, branch):
+        self.config.set_source_branch(branch)
+
+    def _store_target_branch(self, branch):
+        self.config.set_target_branch(branch)
 
 
-    def refresh_branches(self):
+    def refresh_branches(self, auto=False):
         repo = self.repo_input.text().strip()
         if not repo:
-            QMessageBox.warning(self, "Input Error", "Please select a repository directory.")
+            if not auto:
+                QMessageBox.warning(self, "Input Error", "Please select a repository directory.")
             return
 
         try:
@@ -130,8 +160,16 @@ class CreatePRTab(QWidget):
             self.src_selector.set_items(branches)
             self.dst_selector.set_items(branches)
 
+            stored_source = self.config.get_source_branch()
+            stored_target = self.config.get_target_branch()
+            if stored_source:
+                self.src_selector.set_current_text(stored_source)
+            if stored_target:
+                self.dst_selector.set_current_text(stored_target)
+
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load branches:\n{e}")
+            if not auto:
+                QMessageBox.critical(self, "Error", f"Failed to load branches:\n{e}")
 
 
     def create_pr(self):
@@ -161,3 +199,34 @@ class CreatePRTab(QWidget):
             QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create PR:\n{e}")
+
+    # ------------------------------------------------------------------
+    # Synchronisation helpers
+    def set_repo(self, repo_dir):
+        block = self.repo_input.blockSignals(True)
+        self.repo_input.setText(repo_dir)
+        self.repo_input.blockSignals(block)
+
+    def apply_repo_config(self):
+        repo_dir = self.config.get_repo_dir()
+        self.set_repo(repo_dir)
+
+        self.bb_user.setText(self.config.get_bitbucket_username())
+        self.bb_pwd.setText(self.config.get_bitbucket_app_password())
+        self.bb_slug.setText(self.config.get_repo_slug())
+        self.pr_title.setText(self.config.get_pr_title())
+
+        src_branch = self.config.get_source_branch()
+        dst_branch = self.config.get_target_branch()
+        if src_branch:
+            self.src_selector.set_current_text(src_branch)
+        else:
+            self.src_selector.set_current_text("")
+
+        if dst_branch:
+            self.dst_selector.set_current_text(dst_branch)
+        else:
+            self.dst_selector.set_current_text("")
+
+        if repo_dir:
+            self.refresh_branches(auto=True)
