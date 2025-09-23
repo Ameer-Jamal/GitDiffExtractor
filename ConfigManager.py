@@ -25,7 +25,12 @@ class ConfigManager:
         "commit_hashes": "",
         "pr_title": "",
         "source_branch": "",
-        "target_branch": ""
+        "target_branch": "",
+        "provider": "bitbucket",
+        "bitbucket_workspace": "",
+        "github_owner": "",
+        "github_repo": "",
+        "github_token": ""
     }
 
     def __init__(self):
@@ -199,3 +204,35 @@ class ConfigManager:
 
     def set_target_branch(self, branch: str) -> None:
         self._update_repo_value("target_branch", branch)
+
+    def get_provider(self) -> str:
+        provider = self.repo_config.get("provider", "bitbucket")
+        return provider or "bitbucket"
+
+    def set_provider(self, provider: str) -> None:
+        provider = (provider or "bitbucket").lower()
+        self._update_repo_value("provider", provider)
+
+    def get_bitbucket_workspace(self) -> str:
+        return self.repo_config.get("bitbucket_workspace", "")
+
+    def set_bitbucket_workspace(self, workspace: str) -> None:
+        self._update_repo_value("bitbucket_workspace", workspace)
+
+    def get_github_owner(self) -> str:
+        return self.repo_config.get("github_owner", "")
+
+    def set_github_owner(self, owner: str) -> None:
+        self._update_repo_value("github_owner", owner)
+
+    def get_github_repo(self) -> str:
+        return self.repo_config.get("github_repo", "")
+
+    def set_github_repo(self, repo: str) -> None:
+        self._update_repo_value("github_repo", repo)
+
+    def get_github_token(self) -> str:
+        return self.repo_config.get("github_token", "")
+
+    def set_github_token(self, token: str) -> None:
+        self._update_repo_value("github_token", token)

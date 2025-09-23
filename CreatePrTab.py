@@ -54,6 +54,10 @@ class CreatePRTab(QWidget):
         repo_form.addRow("App Password:", self.bb_pwd)
         self.bb_pwd.editingFinished.connect(self._store_bitbucket_password)
 
+        self.bb_workspace = QLineEdit(self.config.get_bitbucket_workspace())
+        repo_form.addRow("Workspace:", self.bb_workspace)
+        self.bb_workspace.editingFinished.connect(self._store_bitbucket_workspace)
+
         self.bb_slug = QLineEdit(self.config.get_repo_slug())
         repo_form.addRow("Repo Slug:", self.bb_slug)
         self.bb_slug.editingFinished.connect(self._store_repo_slug)
@@ -128,6 +132,9 @@ class CreatePRTab(QWidget):
     def _store_bitbucket_password(self):
         self.config.set_bitbucket_app_password(self.bb_pwd.text().strip())
 
+    def _store_bitbucket_workspace(self):
+        self.config.set_bitbucket_workspace(self.bb_workspace.text().strip())
+
     def _store_repo_slug(self):
         self.config.set_repo_slug(self.bb_slug.text().strip())
 
@@ -175,16 +182,17 @@ class CreatePRTab(QWidget):
     def create_pr(self):
         u    = self.bb_user.text().strip()
         p    = self.bb_pwd.text().strip()
+        workspace = self.bb_workspace.text().strip()
         slug = self.bb_slug.text().strip()
         src  = self.src_selector.current_text().replace('origin/', '').strip()
         dst  = self.dst_selector.current_text().replace('origin/', '').strip()
         title= self.pr_title.text().strip()
 
-        if not all((u, p, slug, src, dst, title)):
+        if not all((u, p, workspace, slug, src, dst, title)):
             QMessageBox.warning(self, "Input Error", "All fields are required.")
             return
 
-        url = f"https://api.bitbucket.org/2.0/repositories/etqdev/{slug}/pullrequests"
+        url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
         payload = {
             "title": title,
             "source":      {"branch": {"name": src}},
@@ -213,6 +221,7 @@ class CreatePRTab(QWidget):
 
         self.bb_user.setText(self.config.get_bitbucket_username())
         self.bb_pwd.setText(self.config.get_bitbucket_app_password())
+        self.bb_workspace.setText(self.config.get_bitbucket_workspace())
         self.bb_slug.setText(self.config.get_repo_slug())
         self.pr_title.setText(self.config.get_pr_title())
 

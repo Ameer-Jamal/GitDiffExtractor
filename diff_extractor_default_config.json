@@ -1,12 +1,17 @@
 {
-    "last_repo_dir": "",
-    "last_output_dir": "",
-    "origin_branch": "",
-    "bitbucket_username": "",
+    "last_repo_dir": "/Users/ajamal/Documents/Reliance-Repos/NXG/mt-frontend",
+    "last_output_dir": "/Users/ajamal/Documents/GitDiffs",
+    "origin_branch": "origin/release/2024c",
+    "bitbucket_username": "AmeerJamal",
     "bitbucket_app_password": "",
-    "repo_slug": "",
+    "repo_slug": "mt-frontend",
     "commit_hashes": "",
     "pr_title": "",
     "source_branch": "",
-    "target_branch": ""
+    "target_branch": "",
+    "provider": "bitbucket",
+    "bitbucket_workspace": "etqdev",
+    "github_owner": "",
+    "github_repo": "",
+    "github_token": ""
 }
