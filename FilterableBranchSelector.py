@@ -1,4 +1,4 @@
-from PyQt5.QtCore    import Qt, QPoint, QEvent
+from PyQt5.QtCore    import Qt, QPoint, QEvent, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QLineEdit, QListWidget,
     QListWidgetItem, QVBoxLayout
@@ -6,6 +6,8 @@ from PyQt5.QtWidgets import (
 
 
 class FilterableBranchSelector(QWidget):
+    selectionChanged = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -80,7 +82,11 @@ class FilterableBranchSelector(QWidget):
         """Select branch and close popup."""
         self.line_edit.setText(item.text())
         self.popup.hide()
+        self.selectionChanged.emit(item.text())
 
 
     def current_text(self):
         return self.line_edit.text()
+
+    def set_current_text(self, text):
+        self.line_edit.setText(text)

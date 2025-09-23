@@ -36,15 +36,24 @@ class GitDiffExtractor(QWidget):
         # Create the PR Diff Extractor UI and Branch Commit Viewer UI as separate widgets
         self.initUI()
 
+        # Build tabs
+        self.pr_tab_widget = self.prExtractDiffWidget()
+        self.branch_viewer = BranchCommitViewer(self.config_manager)
+        self.branch_viewer.repoChanged.connect(self.on_repo_changed)
+        self.create_pr_tab = CreatePRTab(self.config_manager)
+        self.create_pr_tab.repoChanged.connect(self.on_repo_changed)
+
         # Add both tabs to the QTabWidget
-        self.tabs.addTab(self.prExtractDiffWidget(), "PR Diff Extractor")  # Default tab
-        self.tabs.addTab(BranchCommitViewer(), "Branch Commit Viewer")
-        self.tabs.addTab(CreatePRTab(self.config_manager), "Create PR")
+        self.tabs.addTab(self.pr_tab_widget, "PR Diff Extractor")  # Default tab
+        self.tabs.addTab(self.branch_viewer, "Branch Commit Viewer")
+        self.tabs.addTab(self.create_pr_tab, "Create PR")
 
         # Set the layout for the main window
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
+
+        self.apply_repo_config()
 
     def initUI(self):
         self.setWindowTitle('Git Diff Extractor')
@@ -61,6 +70,7 @@ class GitDiffExtractor(QWidget):
         repo_layout.addWidget(self.repo_label)
         self.repo_input = QLineEdit(self)
         self.repo_input.setText(self.config_manager.get_repo_dir())  # Load last used repo dir
+        self.repo_input.editingFinished.connect(self._handle_repo_edit)
         repo_layout.addWidget(self.repo_input)
         self.repo_button = QPushButton('Browse', self)
         self.repo_button.clicked.connect(self.browseRepo)
@@ -72,6 +82,7 @@ class GitDiffExtractor(QWidget):
         self.commit_label = QLabel('Commit Hashes (comma or space-separated):')
         commit_layout.addWidget(self.commit_label)
         self.commit_input = QLineEdit(self)
+        self.commit_input.editingFinished.connect(self._store_commit_hashes)
         commit_layout.addWidget(self.commit_input)
         layout.addLayout(commit_layout)
 
@@ -81,6 +92,7 @@ class GitDiffExtractor(QWidget):
         output_layout.addWidget(self.output_label)
         self.output_input = QLineEdit(self)
         self.output_input.setText(self.config_manager.get_output_dir())  # Load last used output dir
+        self.output_input.editingFinished.connect(self._store_output_dir)
         output_layout.addWidget(self.output_input)
         self.output_button = QPushButton('Browse', self)
         self.output_button.clicked.connect(self.browseOutput)
@@ -96,8 +108,7 @@ class GitDiffExtractor(QWidget):
         # List of Pull Requests
         self.pr_list = QListWidget(self)
         self.pr_list.itemClicked.connect(self.onPRClick)
-        if (self.repo_input.text and self.output_input.text):
-            self.pr_list.itemDoubleClicked.connect(self.generateDiff)
+        self.pr_list.itemDoubleClicked.connect(self.generateDiff)
         layout.addWidget(self.pr_list)
 
         # Load PRs Button
@@ -171,7 +182,7 @@ class GitDiffExtractor(QWidget):
         directory = self.selectDirectory("Select Repository Directory")
         if directory:
             self.repo_input.setText(directory)
-            self.config_manager.set_repo_dir(directory)  # Save to config
+            self.on_repo_changed(directory)
 
     def browseOutput(self):
         directory = self.selectDirectory("Select Output Directory")
@@ -185,7 +196,9 @@ class GitDiffExtractor(QWidget):
 
     def generateDiff(self):
         repo_dir = self.repo_input.text()
-        commit_hashes = self.commit_input.text().replace(',', ' ').split()
+        commit_text = self.commit_input.text()
+        commit_hashes = commit_text.replace(',', ' ').split()
+        self.config_manager.set_commit_hashes(commit_text.strip())
         output_dir = self.output_input.text()
 
         if not repo_dir or not commit_hashes or not output_dir:
@@ -308,6 +321,7 @@ class GitDiffExtractor(QWidget):
         """ When a PR is clicked, insert the commit hash into the commit input box. """
         commit_hash = item.data(Qt.UserRole)  # Retrieve the stored commit hash
         self.commit_input.setText(commit_hash)
+        self.config_manager.set_commit_hashes(commit_hash)
 
     @staticmethod
     def openFile(file_path):
@@ -317,6 +331,40 @@ class GitDiffExtractor(QWidget):
             os.startfile(file_path)
         else:
             subprocess.run(['xdg-open', file_path])
+
+    # ------------------------------------------------------------------
+    # Configuration synchronisation
+    def on_repo_changed(self, repo_dir):
+        repo_dir = repo_dir.strip()
+        self.config_manager.set_repo_dir(repo_dir)
+        self.apply_repo_config()
+
+    def apply_repo_config(self):
+        repo_dir = self.config_manager.get_repo_dir()
+        output_dir = self.config_manager.get_output_dir()
+        commits = self.config_manager.get_commit_hashes()
+
+        self._set_line_edit_text(self.repo_input, repo_dir)
+        self._set_line_edit_text(self.output_input, output_dir)
+        self._set_line_edit_text(self.commit_input, commits)
+
+        self.branch_viewer.apply_repo_config()
+        self.create_pr_tab.apply_repo_config()
+
+    @staticmethod
+    def _set_line_edit_text(line_edit, value):
+        block = line_edit.blockSignals(True)
+        line_edit.setText(value)
+        line_edit.blockSignals(block)
+
+    def _handle_repo_edit(self):
+        self.on_repo_changed(self.repo_input.text())
+
+    def _store_commit_hashes(self):
+        self.config_manager.set_commit_hashes(self.commit_input.text().strip())
+
+    def _store_output_dir(self):
+        self.config_manager.set_output_dir(self.output_input.text().strip())
 
 if __name__ == '__main__':
     app = QApplication([])

@@ -1,104 +1,201 @@
 import json
 import os
-
-import json
-import os
 import shutil
 import tempfile
+from typing import Any, Optional
+
+from PyQt5.QtCore import QSettings
 
 
 class ConfigManager:
-    def __init__(self, config_file='diff_extractor_default_config.json'):
-        self.config_file = config_file
-        self.config = {
-            "last_repo_dir": "",
-            "last_output_dir": "",
-            "origin_branch": ""
-        }
-        self.load_config()
+    """Central storage for user preferences and per-repository settings."""
 
-    def save_config(self):
-        """ Save the current configuration to the file in a more robust way. """
+    ORG_NAME = "GitDiffExtractor"
+    APP_NAME = "GitDiffExtractor"
+    LEGACY_CONFIG_FILE = "diff_extractor_default_config.json"
+    REPO_CONFIG_FILE = ".git_diff_extractor.json"
+
+    DEFAULT_REPO_CONFIG = {
+        "last_repo_dir": "",
+        "last_output_dir": "",
+        "origin_branch": "",
+        "bitbucket_username": "",
+        "bitbucket_app_password": "",
+        "repo_slug": "",
+        "commit_hashes": "",
+        "pr_title": "",
+        "source_branch": "",
+        "target_branch": ""
+    }
+
+    def __init__(self):
+        self.settings = QSettings(self.ORG_NAME, self.APP_NAME)
+        self.current_repo = self.settings.value("last_repo_dir", "", str)
+        self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
+
+        # Support migrating values from the legacy JSON file on first run
+        self._migrate_legacy_settings()
+
+        if self.current_repo:
+            self._load_repo_config(self.current_repo)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    def _migrate_legacy_settings(self) -> None:
+        """Import values from the previous JSON configuration if present."""
+        if self.settings.value("_legacy_migrated", False, bool):
+            return
+
+        if not os.path.exists(self.LEGACY_CONFIG_FILE):
+            self.settings.setValue("_legacy_migrated", True)
+            return
+
         try:
-            # Ensure the directory for the config file exists
-            config_dir = os.path.dirname(self.config_file)
+            with open(self.LEGACY_CONFIG_FILE, "r") as legacy_file:
+                legacy_data = json.load(legacy_file)
+        except Exception as exc:  # noqa: BLE001 - best effort migration
+            print(f"Error migrating legacy config: {exc}")
+            self.settings.setValue("_legacy_migrated", True)
+            return
+
+        if isinstance(legacy_data, dict):
+            repo_dir = legacy_data.get("last_repo_dir", "")
+            output_dir = legacy_data.get("last_output_dir", "")
+            self.settings.setValue("last_repo_dir", repo_dir)
+            self.settings.setValue("last_output_dir", output_dir)
+            self.current_repo = repo_dir
+
+            if repo_dir:
+                self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
+                for key, value in legacy_data.items():
+                    if key in self.repo_config:
+                        self.repo_config[key] = value
+                self.repo_config["last_repo_dir"] = repo_dir
+                self._save_repo_config(repo_dir)
+
+        self.settings.setValue("_legacy_migrated", True)
+
+    def _repo_config_path(self, repo_dir: str) -> str:
+        return os.path.join(repo_dir, self.REPO_CONFIG_FILE)
+
+    def _load_repo_config(self, repo_dir: str) -> None:
+        """Load per-repository configuration if available."""
+        self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
+
+        if not repo_dir:
+            return
+
+        config_path = self._repo_config_path(repo_dir)
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as repo_file:
+                    data = json.load(repo_file)
+                    if isinstance(data, dict):
+                        self.repo_config.update({k: data.get(k, v)
+                                                 for k, v in self.DEFAULT_REPO_CONFIG.items()})
+            except Exception as exc:  # noqa: BLE001 - prefer resilience
+                print(f"Error reading repo config '{config_path}': {exc}")
+        else:
+            # Initialize an empty config for the repository
+            self.repo_config["last_repo_dir"] = repo_dir
+            self._save_repo_config(repo_dir)
+
+        self.repo_config["last_repo_dir"] = repo_dir
+
+    def _save_repo_config(self, repo_dir: Optional[str] = None) -> None:
+        """Persist the current repository configuration to disk."""
+        repo_dir = repo_dir or self.current_repo
+        if not repo_dir or not os.path.isdir(repo_dir):
+            return
+
+        config_path = self._repo_config_path(repo_dir)
+        config_dir = os.path.dirname(config_path)
+
+        try:
             if config_dir and not os.path.exists(config_dir):
                 os.makedirs(config_dir)
 
-            # Check if we can write to the directory
-            if config_dir and not os.access(config_dir, os.W_OK):
-                raise PermissionError(f"Cannot write to directory: {config_dir}")
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=config_dir or None) as tmp_file:
+                json.dump(self.repo_config, tmp_file, indent=4)
+                temp_path = tmp_file.name
 
-            # Write to a temporary file first
-            with tempfile.NamedTemporaryFile('w', delete=False, dir=config_dir) as temp_file:
-                json.dump(self.config, temp_file, indent=4)
-                temp_file_path = temp_file.name
+            shutil.move(temp_path, config_path)
+        except Exception as exc:  # noqa: BLE001 - avoid hard failure
+            print(f"Error saving repo config '{config_path}': {exc}")
 
-            # Explicitly close the temporary file
-            temp_file.close()
+    def _update_repo_value(self, key: str, value: Any) -> None:
+        if key in self.repo_config:
+            self.repo_config[key] = value
+            self._save_repo_config()
 
-            # Replace the old config file with the new one
-            shutil.move(temp_file_path, self.config_file)
+    # ------------------------------------------------------------------
+    # Global values (stored in QSettings)
+    def get_repo_dir(self) -> str:
+        return self.settings.value("last_repo_dir", "", str)
 
-        except PermissionError as e:
-            print(f"Permission error: {e}")
-        except Exception as e:
-            print(f"Error saving config: {e}")
+    def set_repo_dir(self, repo_dir: str) -> None:
+        repo_dir = repo_dir or ""
+        self.settings.setValue("last_repo_dir", repo_dir)
+        if repo_dir != self.current_repo:
+            self.current_repo = repo_dir
+            self._load_repo_config(repo_dir)
 
-    def load_config(self):
-        """ Load the configuration from the file if it exists. """
-        if os.path.exists(self.config_file):
-            try:
-                with open(self.config_file, 'r') as file:
-                    self.config = json.load(file)
-            except json.JSONDecodeError as e:
-                print(f"Error loading JSON: {e}")
-            except Exception as e:
-                print(f"Error reading config file: {e}")
-    def set_repo_dir(self, repo_dir):
-        """ Set the last repository directory and save the config. """
-        self.config["last_repo_dir"] = repo_dir
-        self.save_config()
+    def get_output_dir(self) -> str:
+        repo_value = self.repo_config.get("last_output_dir", "")
+        if repo_value:
+            return repo_value
+        return self.settings.value("last_output_dir", "", str)
 
-    def set_output_dir(self, output_dir):
-        """ Set the last output directory and save the config. """
-        self.config["last_output_dir"] = output_dir
-        self.save_config()
+    def set_output_dir(self, output_dir: str) -> None:
+        self.settings.setValue("last_output_dir", output_dir)
+        self._update_repo_value("last_output_dir", output_dir)
 
-    def set_origin_branch(self, origin_branch):
-        """ Set the origin branch and save the config. """
-        self.config["origin_branch"] = origin_branch
-        self.save_config()
+    # ------------------------------------------------------------------
+    # Repository specific values
+    def get_origin_branch(self) -> str:
+        return self.repo_config.get("origin_branch", "")
 
-    def get_repo_dir(self):
-        return self.config.get("last_repo_dir", "")
+    def set_origin_branch(self, origin_branch: str) -> None:
+        self._update_repo_value("origin_branch", origin_branch)
 
-    def get_output_dir(self):
-        return self.config.get("last_output_dir", "")
+    def get_bitbucket_username(self) -> str:
+        return self.repo_config.get("bitbucket_username", "")
 
-    def get_origin_branch(self):
-        return self.config.get("origin_branch", "")
-    def set_bitbucket_username(self, username):
-        self.config["bitbucket_username"] = username
-        self.save_config()
+    def set_bitbucket_username(self, username: str) -> None:
+        self._update_repo_value("bitbucket_username", username)
 
-    def get_bitbucket_username(self):
-        return self.config.get("bitbucket_username", "")
+    def get_bitbucket_app_password(self) -> str:
+        return self.repo_config.get("bitbucket_app_password", "")
 
-    def set_bitbucket_app_password(self, pwd):
-        self.config["bitbucket_app_password"] = pwd
-        self.save_config()
+    def set_bitbucket_app_password(self, pwd: str) -> None:
+        self._update_repo_value("bitbucket_app_password", pwd)
 
-    def get_bitbucket_app_password(self):
-        return self.config.get("bitbucket_app_password", "")
+    def get_repo_slug(self) -> str:
+        return self.repo_config.get("repo_slug", "")
 
-    def set_repo_slug(self, slug):
-        self.config["repo_slug"] = slug
-        self.save_config()
+    def set_repo_slug(self, slug: str) -> None:
+        self._update_repo_value("repo_slug", slug)
 
-    def get_repo_slug(self):
-        return self.config.get("repo_slug", "")
+    def get_commit_hashes(self) -> str:
+        return self.repo_config.get("commit_hashes", "")
 
-    def __del__(self):
-        """ Ensure config is saved on application exit. """
-        self.save_config()
+    def set_commit_hashes(self, commit_hashes: str) -> None:
+        self._update_repo_value("commit_hashes", commit_hashes)
+
+    def get_pr_title(self) -> str:
+        return self.repo_config.get("pr_title", "")
+
+    def set_pr_title(self, title: str) -> None:
+        self._update_repo_value("pr_title", title)
+
+    def get_source_branch(self) -> str:
+        return self.repo_config.get("source_branch", "")
+
+    def set_source_branch(self, branch: str) -> None:
+        self._update_repo_value("source_branch", branch)
+
+    def get_target_branch(self) -> str:
+        return self.repo_config.get("target_branch", "")
+
+    def set_target_branch(self, branch: str) -> None:
+        self._update_repo_value("target_branch", branch)

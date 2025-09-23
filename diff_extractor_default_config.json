@@ -4,5 +4,9 @@
     "origin_branch": "",
     "bitbucket_username": "",
     "bitbucket_app_password": "",
-    "repo_slug": ""
+    "repo_slug": "",
+    "commit_hashes": "",
+    "pr_title": "",
+    "source_branch": "",
+    "target_branch": ""
 }
