@@ -3,6 +3,7 @@ import platform
 import re
 import subprocess
 import textwrap
+import time
 
 import requests
 from PyQt5.QtCore import Qt
@@ -13,6 +14,7 @@ from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
 from CreatePrTab import CreatePRTab
 from SettingsTab import SettingsTab
+from TaskRunner import TaskRunner
 
 DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'etqdev').strip() or 'etqdev'
 
@@ -36,6 +38,9 @@ class GitDiffExtractor(QWidget):
         self.config_manager = ConfigManager()
         self.default_output_dir = self.config_manager.get_output_dir()
         self.prs = []  # List to hold PR metadata dictionaries
+        self._pr_cache = {}
+        self._pr_cache_ttl = 60  # seconds
+        self.task_runner = TaskRunner(self)
         # Initialize the QTabWidget
         self.tabs = QTabWidget()
 
@@ -44,9 +49,9 @@ class GitDiffExtractor(QWidget):
 
         # Build tabs
         self.pr_tab_widget = self.prExtractDiffWidget()
-        self.branch_viewer = BranchCommitViewer(self.config_manager)
+        self.branch_viewer = BranchCommitViewer(self.config_manager, self.task_runner)
         self.branch_viewer.repoChanged.connect(self.on_repo_changed)
-        self.create_pr_tab = CreatePRTab(self.config_manager)
+        self.create_pr_tab = CreatePRTab(self.config_manager, self.task_runner)
         self.create_pr_tab.repoChanged.connect(self.on_repo_changed)
         self.settings_tab = SettingsTab(self.config_manager)
         self.settings_tab.providerChanged.connect(self._on_provider_updated)
@@ -125,6 +130,7 @@ class GitDiffExtractor(QWidget):
         self.pr_button = QPushButton('List Diffs', self)
         self.pr_button.clicked.connect(self.listPRs)
         layout.addWidget(self.pr_button)
+        self._pr_button_label = self.pr_button.text()
 
         # Add a radio for filtering merge commits
         self.only_pr_radio = QRadioButton('Only Pull Requests')
@@ -149,6 +155,7 @@ class GitDiffExtractor(QWidget):
         self.run_button = QPushButton('Generate Diff', self)
         self.run_button.clicked.connect(self.generateDiff)
         layout.addWidget(self.run_button)
+        self._run_button_label = self.run_button.text()
 
         pr_widget.setLayout(layout)  # Set the layout for the pr_widget
         return pr_widget
@@ -218,10 +225,19 @@ class GitDiffExtractor(QWidget):
         if selected_item is not None:
             pr_data = selected_item.data(Qt.UserRole)
             if isinstance(pr_data, dict):
-                try:
-                    self._generate_pr_diff(pr_data, repo_dir, output_dir)
-                except Exception as exc:
-                    QMessageBox.critical(self, "Error", f"Failed to generate PR diff:\n{exc}")
+                if self.task_runner:
+                    self._generate_diff_async(repo_dir, output_dir, pr_data=pr_data)
+                else:
+                    try:
+                        diff_path, state = self._generate_pr_diff(pr_data, repo_dir, output_dir)
+                        QMessageBox.information(
+                            self,
+                            "Success",
+                            f"Diff for PR #{pr_data.get('id')} ({state}) saved to {diff_path}.",
+                        )
+                        self.openFile(diff_path)
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.critical(self, "Error", f"Failed to generate PR diff:\n{exc}")
                 return
 
         commit_text = self.commit_input.text()
@@ -232,42 +248,19 @@ class GitDiffExtractor(QWidget):
             QMessageBox.warning(self, INPUT_ERROR, "Enter at least one commit hash or select a pull request.")
             return
 
+        if self.task_runner:
+            self._generate_diff_async(repo_dir, output_dir, commit_hashes=commit_hashes)
+            return
+
         try:
-            for commit_hash in commit_hashes:
-                parents_result = subprocess.run(
-                    ['git', 'rev-list', '--parents', '-n', '1', commit_hash],
-                    capture_output=True,
-                    text=True,
-                    cwd=repo_dir,
-                    check=True,
-                )
-                parents = parents_result.stdout.strip().split()
-
-                if len(parents) == 1:
-                    QMessageBox.warning(
-                        self,
-                        "Warning",
-                        f"The commit {commit_hash} has no parents (initial commit). Skipping.",
-                    )
-                    continue
-
-                parent_commit = parents[1]
-                diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
-                with open(diff_file_path, 'w', encoding='utf-8') as diff_file:
-                    subprocess.run(
-                        ['git', 'diff', parent_commit, commit_hash],
-                        stdout=diff_file,
-                        cwd=repo_dir,
-                        check=True,
-                    )
-
-                self.openFile(diff_file_path)
-
-            QMessageBox.information(self, "Success", "Diff files created and opened.")
-
-        except subprocess.CalledProcessError as exc:
-            QMessageBox.critical(self, "Error", f"Git command failed:\n{exc.stderr or exc}")
-        except Exception as exc:
+            diff_paths, warnings = self._generate_commit_diffs(repo_dir, commit_hashes, output_dir)
+            for path in diff_paths:
+                self.openFile(path)
+            message = f"Created {len(diff_paths)} diff file(s)."
+            if warnings:
+                message += "\n\nWarnings:\n" + "\n".join(warnings)
+            QMessageBox.information(self, "Success", message)
+        except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Error", f"An unexpected error occurred:\n{exc}")
 
     def listPRs(self):
@@ -277,29 +270,77 @@ class GitDiffExtractor(QWidget):
             QMessageBox.warning(self, INPUT_ERROR, "Repository directory must be filled out.")
             return
 
-        provider = self.config_manager.get_provider() or 'bitbucket'
+        provider = (self.config_manager.get_provider() or 'bitbucket').lower()
         filter_mode = self._selected_filter()
 
-        try:
-            if provider == 'github':
-                provider_config = self._get_github_config()
-                if not provider_config:
-                    return
-                prs = self._fetch_github_pull_requests(filter_mode, provider_config)
-            else:
-                provider_config = self._get_bitbucket_config()
-                if not provider_config:
-                    return
-                prs = self._fetch_bitbucket_pull_requests(filter_mode, provider_config)
-        except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
+        if provider == 'github':
+            provider_config = self._get_github_config()
+        else:
+            provider_config = self._get_bitbucket_config()
+
+        if not provider_config:
             return
 
-        self.prs = prs
-        if not prs:
-            QMessageBox.information(self, "No Results", "No pull requests matched the current filters.")
+        cache_key = (provider, filter_mode)
+        cached = self._pr_cache.get(cache_key)
+        if cached:
+            timestamp, cached_prs = cached
+            if time.time() - timestamp < self._pr_cache_ttl:
+                self.prs = cached_prs
+                if not cached_prs:
+                    QMessageBox.information(
+                        self,
+                        "No Results",
+                        "No pull requests matched the current filters.",
+                    )
+                self.displayPRs()
+                return
 
-        self.displayPRs()
+        if not self.task_runner:
+            try:
+                if provider == 'github':
+                    prs = self._fetch_github_pull_requests(filter_mode, provider_config)
+                else:
+                    prs = self._fetch_bitbucket_pull_requests(filter_mode, provider_config)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
+                return
+
+            self.prs = prs
+            if not prs:
+                QMessageBox.information(self, "No Results", "No pull requests matched the current filters.")
+            self.displayPRs()
+            self._pr_cache[cache_key] = (time.time(), prs)
+            return
+
+        self._set_pr_loading(True, "Loading…")
+
+        def task():
+            if provider == 'github':
+                return self._fetch_github_pull_requests(filter_mode, provider_config)
+            return self._fetch_bitbucket_pull_requests(filter_mode, provider_config)
+
+        def on_success(result):
+            self.prs = result
+            if not result:
+                QMessageBox.information(
+                    self,
+                    "No Results",
+                    "No pull requests matched the current filters.",
+                )
+            self.displayPRs()
+            self._pr_cache[cache_key] = (time.time(), result)
+
+        def on_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Load Pull Requests",
+            on_result=on_success,
+            on_error=on_error,
+            on_finished=lambda: self._set_pr_loading(False),
+        )
 
     def displayPRs(self, prs=None):
         """Display pull requests in the list widget."""
@@ -357,11 +398,13 @@ class GitDiffExtractor(QWidget):
         self.displayPRs(filtered)
 
     def _on_settings_updated(self):
+        self._pr_cache.clear()
         self.apply_repo_config()
 
     def _on_provider_updated(self, provider):
         provider = (provider or 'bitbucket').lower()
         self.create_pr_tab.setEnabled(provider == 'bitbucket')
+        self._pr_cache.clear()
         self.prs = []
         self.pr_list.clear()
 
@@ -625,12 +668,7 @@ class GitDiffExtractor(QWidget):
                         exc.stderr or '')
             raise RuntimeError(f"git diff failed: {stderr.strip() or exc}") from exc
 
-        QMessageBox.information(
-            self,
-            "Success",
-            f"Diff for PR #{pr_id} ({state}) saved to {diff_path}.",
-        )
-        self.openFile(diff_path)
+        return diff_path, state
 
     def _resolve_commit(self, repo_dir, commit_hash, branch_name):
         candidates = []
@@ -700,6 +738,113 @@ class GitDiffExtractor(QWidget):
         if not sanitized:
             sanitized = fallback
         return sanitized[:60]
+
+    def _set_pr_loading(self, loading, message=None):
+        if loading:
+            self.pr_button.setText(message or "Working…")
+            self.run_button.setText("Working…")
+        else:
+            self.pr_button.setText(self._pr_button_label)
+            self.run_button.setText(self._run_button_label)
+
+        widgets = [
+            self.pr_button,
+            self.run_button,
+            self.pr_list,
+            self.search_input,
+            self.only_pr_radio,
+            self.only_merges_radio,
+            self.all_diffs_radio,
+        ]
+        for widget in widgets:
+            widget.setEnabled(not loading)
+
+    def _generate_diff_async(self, repo_dir, output_dir, pr_data=None, commit_hashes=None):
+        self._set_pr_loading(True, "Processing…")
+
+        def task():
+            if pr_data is not None:
+                diff_path, state = self._generate_pr_diff(pr_data, repo_dir, output_dir)
+                return {
+                    'type': 'pr',
+                    'paths': [diff_path],
+                    'state': state,
+                    'pr': pr_data,
+                }
+
+            diff_paths, warnings = self._generate_commit_diffs(repo_dir, commit_hashes, output_dir)
+            return {
+                'type': 'commits',
+                'paths': diff_paths,
+                'warnings': warnings,
+            }
+
+        def on_result(result):
+            if result['type'] == 'pr':
+                info = result['pr']
+                diff_path = result['paths'][0]
+                state = result.get('state', 'UNKNOWN')
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    f"Diff for PR #{info.get('id')} ({state}) saved to {diff_path}.",
+                )
+                self.openFile(diff_path)
+            else:
+                warnings = result.get('warnings', [])
+                for path in result['paths']:
+                    self.openFile(path)
+                message = f"Created {len(result['paths'])} diff file(s)."
+                if warnings:
+                    message += "\n\nWarnings:\n" + "\n".join(warnings)
+                QMessageBox.information(self, "Success", message)
+
+        def on_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"Failed to generate diff:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Generate Diff",
+            on_result=on_result,
+            on_error=on_error,
+            on_finished=lambda: self._set_pr_loading(False),
+        )
+
+    def _generate_commit_diffs(self, repo_dir, commit_hashes, output_dir):
+        warnings = []
+        diff_paths = []
+
+        for commit_hash in commit_hashes:
+            parents_result = subprocess.run(
+                ['git', 'rev-list', '--parents', '-n', '1', commit_hash],
+                capture_output=True,
+                text=True,
+                cwd=repo_dir,
+                check=True,
+            )
+            parents = parents_result.stdout.strip().split()
+
+            if len(parents) == 1:
+                warnings.append(
+                    f"Commit {commit_hash} has no parents (initial commit). Skipped."
+                )
+                continue
+
+            parent_commit = parents[1]
+            diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
+            with open(diff_file_path, 'w', encoding='utf-8') as diff_file:
+                subprocess.run(
+                    ['git', 'diff', parent_commit, commit_hash],
+                    stdout=diff_file,
+                    cwd=repo_dir,
+                    check=True,
+                )
+            diff_paths.append(diff_file_path)
+
+        if not diff_paths:
+            raise RuntimeError("No diff files were generated for the provided commits.")
+
+        return diff_paths, warnings
 
     def onPRClick(self, item):
         """Populate the commit input based on the selected PR."""

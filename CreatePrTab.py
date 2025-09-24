@@ -15,9 +15,10 @@ from FilterableBranchSelector import FilterableBranchSelector
 class CreatePRTab(QWidget):
     repoChanged = pyqtSignal(str)
 
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, task_runner=None):
         super().__init__()
         self.config = config_manager
+        self.task_runner = task_runner
         self._build_ui()
 
     def _build_ui(self):
@@ -107,11 +108,15 @@ class CreatePRTab(QWidget):
         refresh_btn.setFixedHeight(30)
         refresh_btn.clicked.connect(self.refresh_branches)
         btn_layout.addWidget(refresh_btn)
+        self.refresh_btn = refresh_btn
+        self._refresh_btn_label = refresh_btn.text()
 
         create_btn = QPushButton("Create PR")
         create_btn.setFixedHeight(30)
         create_btn.clicked.connect(self.create_pr)
         btn_layout.addWidget(create_btn)
+        self.create_btn = create_btn
+        self._create_btn_label = create_btn.text()
 
         main.addLayout(btn_layout)
 
@@ -155,14 +160,7 @@ class CreatePRTab(QWidget):
                 QMessageBox.warning(self, "Input Error", "Please select a repository directory.")
             return
 
-        try:
-            os.chdir(repo)
-            subprocess.run(['git', 'fetch', 'origin'], check=True, stdout=subprocess.DEVNULL)
-            output = subprocess.run(
-                ['git', 'branch', '-r'],
-                capture_output=True, text=True, check=True
-            ).stdout
-
+        def sync_branch_lists(output):
             branches = [b.strip() for b in output.splitlines() if b.strip().startswith('origin/')]
             self.src_selector.set_items(branches)
             self.dst_selector.set_items(branches)
@@ -174,9 +172,59 @@ class CreatePRTab(QWidget):
             if stored_target:
                 self.dst_selector.set_current_text(stored_target)
 
-        except Exception as e:
+        if not self.task_runner:
+            try:
+                subprocess.run(
+                    ['git', 'fetch', 'origin'],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    cwd=repo,
+                )
+                output = subprocess.run(
+                    ['git', 'branch', '-r'],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    cwd=repo,
+                ).stdout
+                sync_branch_lists(output)
+            except Exception as e:  # noqa: BLE001
+                if not auto:
+                    QMessageBox.critical(self, "Error", f"Failed to load branches:\n{e}")
+            return
+
+        self._set_refresh_state(True)
+
+        def task():
+            subprocess.run(
+                ['git', 'fetch', 'origin'],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                cwd=repo,
+            )
+            result = subprocess.run(
+                ['git', 'branch', '-r'],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo,
+            )
+            return result.stdout
+
+        def on_success(output):
+            sync_branch_lists(output)
+
+        def on_error(exc: Exception):
             if not auto:
-                QMessageBox.critical(self, "Error", f"Failed to load branches:\n{e}")
+                QMessageBox.critical(self, "Error", f"Failed to load branches:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Refresh Branches",
+            on_result=on_success,
+            on_error=on_error,
+            on_finished=lambda: self._set_refresh_state(False),
+        )
 
 
     def create_pr(self):
@@ -200,13 +248,31 @@ class CreatePRTab(QWidget):
             "close_source_branch": False
         }
 
-        try:
-            response = requests.post(url, auth=(u, p), json=payload)
+        if not self.task_runner:
+            self._create_pr_sync(url, u, p, payload)
+            return
+
+        self._set_create_state(True)
+
+        def task():
+            response = requests.post(url, auth=(u, p), json=payload, timeout=15)
             response.raise_for_status()
             link = response.json()["links"]["html"]["href"]
+            return link
+
+        def on_success(link):
             QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to create PR:\n{e}")
+
+        def on_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"Failed to create PR:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Create Pull Request",
+            on_result=on_success,
+            on_error=on_error,
+            on_finished=lambda: self._set_create_state(False),
+        )
 
     # ------------------------------------------------------------------
     # Synchronisation helpers
@@ -239,3 +305,32 @@ class CreatePRTab(QWidget):
 
         if repo_dir:
             self.refresh_branches(auto=True)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    def _set_refresh_state(self, busy):
+        if not hasattr(self, 'refresh_btn'):
+            return
+        if busy:
+            self.refresh_btn.setText("Refreshing…")
+        else:
+            self.refresh_btn.setText(self._refresh_btn_label)
+        self.refresh_btn.setEnabled(not busy)
+
+    def _set_create_state(self, busy):
+        if not hasattr(self, 'create_btn'):
+            return
+        if busy:
+            self.create_btn.setText("Creating…")
+        else:
+            self.create_btn.setText(self._create_btn_label)
+        self.create_btn.setEnabled(not busy)
+
+    def _create_pr_sync(self, url, username, password, payload):
+        try:
+            response = requests.post(url, auth=(username, password), json=payload, timeout=15)
+            response.raise_for_status()
+            link = response.json()["links"]["html"]["href"]
+            QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Error", f"Failed to create PR:\n{exc}")

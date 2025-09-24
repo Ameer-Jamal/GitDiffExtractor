@@ -15,10 +15,11 @@ from PyQt5.QtWidgets import (
 class BranchCommitViewer(QWidget):
     repoChanged = pyqtSignal(str)
 
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, task_runner=None):
         super().__init__()
 
         self.config_manager = config_manager
+        self.task_runner = task_runner
 
         layout = QVBoxLayout()
 
@@ -61,6 +62,8 @@ class BranchCommitViewer(QWidget):
         layout.addWidget(self.get_commits_button)
 
         self.setLayout(layout)
+        self._load_button_label = self.load_branches_button.text()
+        self._get_commits_label = self.get_commits_button.text()
         self.apply_repo_config()
 
     # ------------------------------------------------------------------
@@ -89,21 +92,38 @@ class BranchCommitViewer(QWidget):
             QMessageBox.warning(self, "Input Error", "Repository path must be provided.")
             return
 
-        try:
-            os.chdir(repo_dir)
-            # Ensure the local repo is up to date with the remote
-            subprocess.run(['git', 'fetch', 'origin'], check=True)
+        if not self.task_runner:
+            self._load_branches_sync(repo_dir)
+            return
 
-            # Load all branches (including remote)
-            result = subprocess.run(['git', 'branch', '-r'], capture_output=True, text=True)
-            branches = result.stdout.strip().splitlines()
+        self._set_loading_state(True, self.load_branches_button, "Loading branches…")
 
+        def task():
+            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
+            result = subprocess.run(
+                ['git', 'branch', '-r'],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo_dir,
+            )
+            return [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
+
+        def on_result(branches):
             self.branch_list.clear()
             for branch in branches:
-                self.branch_list.addItem(branch.strip())
+                self.branch_list.addItem(branch)
 
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred while loading branches: {str(e)}")
+        def on_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"An error occurred while loading branches:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Load Branches",
+            on_result=on_result,
+            on_error=on_error,
+            on_finished=lambda: self._set_loading_state(False, self.load_branches_button),
+        )
 
     def searchBranches(self):
         search_term = self.search_input.text().strip().lower()
@@ -141,50 +161,67 @@ class BranchCommitViewer(QWidget):
             )
             return
 
-        try:
-            os.chdir(repo_dir)
+        target_branch = branch_name
+        origin_branch = base_branch
+        if not branch_name.startswith('origin/'):
+            target_branch = f'origin/{branch_name}'
+        if not base_branch.startswith('origin/'):
+            origin_branch = f'origin/{base_branch}'
 
-            # Ensure branches are up to date
-            subprocess.run(['git', 'fetch', 'origin'], check=True)
+        if not self.task_runner:
+            self._get_commits_sync(repo_dir, origin_branch, target_branch, output_dir)
+            return
 
-            # If the branch is remote, ensure we are using the correct format for remote branches
-            if not branch_name.startswith('origin/'):
-                branch_name = f'origin/{branch_name}'
+        self._set_loading_state(True, self.get_commits_button, "Generating diff…")
 
-            # Use the base branch as inputted by the user
-            if not base_branch.startswith('origin/'):
-                base_branch = f'origin/{base_branch}'
-
-            # Find the common ancestor (where the branch diverged from the base branch)
+        def task():
+            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
             merge_base_result = subprocess.run(
-                ['git', 'merge-base', base_branch, branch_name], capture_output=True, text=True
+                ['git', 'merge-base', origin_branch, target_branch],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             merge_base = merge_base_result.stdout.strip()
-
             if not merge_base:
-                QMessageBox.critical(
-                    self,
-                    "Error",
-                    f"Unable to find common ancestor between {base_branch} and {branch_name}.",
+                raise RuntimeError(
+                    f"Unable to find common ancestor between {origin_branch} and {target_branch}."
                 )
-                return
 
-            # Generate diff from the point where the branch diverged from the base
             diff_file_path = os.path.join(
-                output_dir, f'all_commits_on_{branch_name.replace("/", "_")}.diff'
+                output_dir, f'all_commits_on_{target_branch.replace("/", "_")}.diff'
             )
 
-            with open(diff_file_path, 'w') as diff_file:
-                subprocess.run(['git', 'diff', merge_base, branch_name], stdout=diff_file)
+            with open(diff_file_path, 'w', encoding='utf-8') as diff_file:
+                subprocess.run(
+                    ['git', 'diff', merge_base, target_branch],
+                    cwd=repo_dir,
+                    stdout=diff_file,
+                    check=True,
+                )
 
-            # Inform the user and open the file
+            return diff_file_path, target_branch
+
+        def on_result(result):
+            diff_file_path, resolved_branch = result
             QMessageBox.information(
-                self, "Success", f"All diffs for branch {branch_name} saved to {diff_file_path}."
+                self,
+                "Success",
+                f"All diffs for branch {resolved_branch} saved to {diff_file_path}.",
             )
             self.openFile(diff_file_path)
 
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+        def on_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"An error occurred:\n{exc}")
+
+        self.task_runner.run(
+            task,
+            description="Generate Branch Diff",
+            on_result=on_result,
+            on_error=on_error,
+            on_finished=lambda: self._set_loading_state(False, self.get_commits_button),
+        )
 
     def openFile(self, file_path):
         if not os.path.exists(file_path):
@@ -198,8 +235,85 @@ class BranchCommitViewer(QWidget):
                 os.startfile(file_path)
             else:
                 subprocess.run(['xdg-open', file_path], check=True)
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"Failed to open file: {str(e)}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Error", f"Failed to open file:\n{exc}")
+
+    # ------------------------------------------------------------------
+    # Internal helper utilities
+    def _set_loading_state(self, loading, button, busy_text=None):
+        button = button or self.load_branches_button
+        if loading:
+            if button is self.load_branches_button:
+                self.load_branches_button.setText(busy_text or "Loading…")
+            elif button is self.get_commits_button:
+                self.get_commits_button.setText(busy_text or "Processing…")
+        else:
+            self.load_branches_button.setText(self._load_button_label)
+            self.get_commits_button.setText(self._get_commits_label)
+
+        widgets = [
+            self.load_branches_button,
+            self.set_origin_button,
+            self.search_input,
+            self.branch_list,
+            self.get_commits_button,
+        ]
+        for widget in widgets:
+            widget.setEnabled(not loading)
+
+    def _load_branches_sync(self, repo_dir):
+        try:
+            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
+            result = subprocess.run(
+                ['git', 'branch', '-r'],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo_dir,
+            )
+            branches = [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
+            self.branch_list.clear()
+            for branch in branches:
+                self.branch_list.addItem(branch)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Error", f"An error occurred while loading branches:\n{exc}")
+
+    def _get_commits_sync(self, repo_dir, base_branch, target_branch, output_dir):
+        try:
+            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
+            merge_base_result = subprocess.run(
+                ['git', 'merge-base', base_branch, target_branch],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            merge_base = merge_base_result.stdout.strip()
+            if not merge_base:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Unable to find common ancestor between {base_branch} and {target_branch}.",
+                )
+                return
+
+            diff_file_path = os.path.join(
+                output_dir, f'all_commits_on_{target_branch.replace("/", "_")}.diff'
+            )
+            with open(diff_file_path, 'w', encoding='utf-8') as diff_file:
+                subprocess.run(
+                    ['git', 'diff', merge_base, target_branch],
+                    cwd=repo_dir,
+                    stdout=diff_file,
+                    check=True,
+                )
+
+            QMessageBox.information(
+                self, "Success", f"All diffs for branch {target_branch} saved to {diff_file_path}."
+            )
+            self.openFile(diff_file_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Error", f"An error occurred:\n{exc}")
 
     def setSelectedBranchAsOrigin(self):
         selected_items = self.branch_list.selectedItems()
