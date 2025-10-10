@@ -35,11 +35,17 @@ class GitDiffExtractor(QWidget):
         self.radio_group = None
         self.only_merges_checkbox = None
         self.pr_button = None
+        self.load_more_button = None
+        self._load_more_label = ''
         self.config_manager = ConfigManager()
         self.default_output_dir = self.config_manager.get_output_dir()
         self.prs = []  # List to hold PR metadata dictionaries
         self._pr_cache = {}
         self._pr_cache_ttl = 60  # seconds
+        self._pagination_state = None
+        self._current_provider = None
+        self._current_filter_mode = None
+        self._current_provider_config = None
         self.task_runner = TaskRunner(self)
         # Initialize the QTabWidget
         self.tabs = QTabWidget()
@@ -131,6 +137,12 @@ class GitDiffExtractor(QWidget):
         self.pr_button.clicked.connect(self.listPRs)
         layout.addWidget(self.pr_button)
         self._pr_button_label = self.pr_button.text()
+
+        self.load_more_button = QPushButton('Load More', self)
+        self.load_more_button.clicked.connect(self.loadMorePRs)
+        self.load_more_button.setEnabled(False)
+        layout.addWidget(self.load_more_button)
+        self._load_more_label = self.load_more_button.text()
 
         # Add a radio for filtering merge commits
         self.only_pr_radio = QRadioButton('Only Pull Requests')
@@ -281,71 +293,125 @@ class GitDiffExtractor(QWidget):
         if not provider_config:
             return
 
+        self._current_provider = provider
+        self._current_filter_mode = filter_mode
+        self._current_provider_config = provider_config
+
         cache_key = (provider, filter_mode)
         cached = self._pr_cache.get(cache_key)
         if cached:
-            timestamp, cached_prs = cached
+            timestamp, cached_prs, cached_next = cached
             if time.time() - timestamp < self._pr_cache_ttl:
-                self.prs = cached_prs
-                if not cached_prs:
+                self.prs = list(cached_prs)
+                self._pagination_state = cached_next
+                if not self.prs:
                     QMessageBox.information(
                         self,
                         "No Results",
                         "No pull requests matched the current filters.",
                     )
                 self.displayPRs()
+                self.load_more_button.setEnabled(bool(self._pagination_state))
                 return
+
+        self.prs = []
+        self.pr_list.clear()
+        self._pagination_state = None
+        self.load_more_button.setEnabled(False)
+
+        self._load_pr_page(reset=True)
+
+    def loadMorePRs(self):
+        if not self._current_provider or not self._current_provider_config:
+            QMessageBox.warning(self, INPUT_ERROR, "Load pull requests before requesting more results.")
+            return
+
+        if not self._pagination_state:
+            self.load_more_button.setEnabled(False)
+            QMessageBox.information(self, "No More Results", "All pull requests have been loaded.")
+            return
+
+        self._load_pr_page(reset=False)
+
+    def _load_pr_page(self, reset):
+        provider = self._current_provider
+        filter_mode = self._current_filter_mode
+        config = self._current_provider_config
+
+        if not provider or not config:
+            return
+
+        next_cursor = None if reset else self._pagination_state
+
+        def handle_result(result):
+            records, next_token = result
+            self._handle_pr_page_result(records, next_token, reset)
+
+        def handle_error(exc: Exception):
+            QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
+
+        def execute_fetch():
+            if provider == 'github':
+                return self._fetch_github_pull_requests_page(filter_mode, config, next_cursor)
+            return self._fetch_bitbucket_pull_requests_page(filter_mode, config, next_cursor)
 
         if not self.task_runner:
             try:
-                if provider == 'github':
-                    prs = self._fetch_github_pull_requests(filter_mode, provider_config)
-                else:
-                    prs = self._fetch_bitbucket_pull_requests(filter_mode, provider_config)
+                handle_result(execute_fetch())
             except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
-                return
-
-            self.prs = prs
-            if not prs:
-                QMessageBox.information(self, "No Results", "No pull requests matched the current filters.")
-            self.displayPRs()
-            self._pr_cache[cache_key] = (time.time(), prs)
+                handle_error(exc)
             return
 
-        self._set_pr_loading(True, "Loading…")
-
-        def task():
-            if provider == 'github':
-                return self._fetch_github_pull_requests(filter_mode, provider_config)
-            return self._fetch_bitbucket_pull_requests(filter_mode, provider_config)
-
-        def on_success(result):
-            self.prs = result
-            if not result:
-                QMessageBox.information(
-                    self,
-                    "No Results",
-                    "No pull requests matched the current filters.",
-                )
-            self.displayPRs()
-            self._pr_cache[cache_key] = (time.time(), result)
-
-        def on_error(exc: Exception):
-            QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
+        message = "Loading…" if reset else "Loading more…"
+        self._set_pr_loading(True, message)
 
         self.task_runner.run(
-            task,
-            description="Load Pull Requests",
-            on_result=on_success,
-            on_error=on_error,
+            execute_fetch,
+            description="Load Pull Requests" if reset else "Load More Pull Requests",
+            on_result=handle_result,
+            on_error=handle_error,
             on_finished=lambda: self._set_pr_loading(False),
         )
 
-    def displayPRs(self, prs=None):
+    def _handle_pr_page_result(self, records, next_cursor, reset):
+        if reset:
+            self.prs = []
+            self.pr_list.clear()
+
+        self.prs.extend(records)
+
+        if reset and not self.prs:
+            QMessageBox.information(self, "No Results", "No pull requests matched the current filters.")
+
+        search_query = self.search_input.text().strip()
+        if search_query:
+            self.searchPRs()
+        else:
+            if reset:
+                self.displayPRs()
+            else:
+                self.displayPRs(records, append=True)
+
+        if not records and not reset:
+            QMessageBox.information(self, "No More Results", "No additional pull requests were returned.")
+
+        self._pagination_state = next_cursor
+        self.load_more_button.setEnabled(bool(next_cursor))
+
+        cache_key = (self._current_provider, self._current_filter_mode)
+        self._pr_cache[cache_key] = (
+            time.time(),
+            list(self.prs),
+            next_cursor,
+        )
+
+    def displayPRs(self, prs=None, append=False):
         """Display pull requests in the list widget."""
-        self.pr_list.clear()
-        records = prs if prs is not None else self.prs
+        if append:
+            records = prs if prs is not None else []
+        else:
+            self.pr_list.clear()
+            records = prs if prs is not None else self.prs
 
         for pr in records:
             pr_id = pr.get('id', 'Unknown')
@@ -480,43 +546,33 @@ class GitDiffExtractor(QWidget):
             'headers': headers,
         }
 
-    def _fetch_bitbucket_pull_requests(self, filter_mode, config):
+    def _fetch_bitbucket_pull_requests_page(self, filter_mode, config, next_url=None):
         username = config['username']
         password = config['password']
         slug = config['slug']
         workspace = config['workspace']
 
-        url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
-        params = [('pagelen', '50')]
-        if filter_mode == 'open':
-            states = ['OPEN']
-        elif filter_mode == 'merged':
-            states = ['MERGED']
+        base_url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
+        if next_url:
+            request_url = next_url
+            request_params = None
         else:
-            states = ['OPEN', 'MERGED']
+            states = ['OPEN'] if filter_mode == 'open' else ['MERGED'] if filter_mode == 'merged' else ['OPEN', 'MERGED']
+            request_url = base_url
+            request_params = [('pagelen', '50')]
+            request_params.extend(('state', state) for state in states)
 
-        params.extend(('state', state) for state in states)
+        response = requests.get(
+            request_url,
+            params=request_params,
+            auth=(username, password),
+            timeout=15,
+        )
+        response.raise_for_status()
 
-        prs = []
-        next_url = url
-
-        while next_url:
-            response = requests.get(
-                next_url,
-                params=params if next_url == url else None,
-                auth=(username, password),
-                timeout=15,
-            )
-            response.raise_for_status()
-
-            data = response.json()
-            for pr_record in data.get('values', []):
-                prs.append(self._map_bitbucket_pr(pr_record))
-
-            next_url = data.get('next')
-            params = None
-
-        return prs
+        data = response.json()
+        records = [self._map_bitbucket_pr(pr_record) for pr_record in data.get('values', [])]
+        return records, data.get('next')
 
     @staticmethod
     def _map_bitbucket_pr(pr_record):
@@ -542,49 +598,48 @@ class GitDiffExtractor(QWidget):
             'provider': 'bitbucket',
         }
 
-    def _fetch_github_pull_requests(self, filter_mode, config):
+    def _fetch_github_pull_requests_page(self, filter_mode, config, next_url=None):
         owner = config['owner']
         repo = config['repo']
         headers = config['headers']
 
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-        if filter_mode == 'open':
-            state_param = 'open'
-        elif filter_mode == 'merged':
-            state_param = 'closed'
+        if next_url:
+            request_url = next_url
+            request_params = None
         else:
-            state_param = 'all'
+            request_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+            if filter_mode == 'open':
+                state_param = 'open'
+            elif filter_mode == 'merged':
+                state_param = 'closed'
+            else:
+                state_param = 'all'
+            request_params = {'per_page': 50, 'state': state_param}
 
-        params = {'per_page': 50, 'state': state_param}
-        prs = []
-        next_url = url
+        response = requests.get(
+            request_url,
+            params=request_params,
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
 
-        while next_url:
-            response = requests.get(
-                next_url,
-                params=params if next_url == url else None,
-                headers=headers,
-                timeout=15,
-            )
-            response.raise_for_status()
+        data = response.json()
+        records = []
 
-            data = response.json()
+        for pr_record in data:
+            is_merged = bool(pr_record.get('merged_at'))
+            state = pr_record.get('state', 'open')
 
-            for pr_record in data:
-                is_merged = bool(pr_record.get('merged_at'))
-                state = pr_record.get('state', 'open')
+            if filter_mode == 'merged' and not is_merged:
+                continue
+            if filter_mode == 'open' and state != 'open':
+                continue
 
-                if filter_mode == 'merged' and not is_merged:
-                    continue
-                if filter_mode == 'open' and state != 'open':
-                    continue
+            records.append(self._map_github_pr(pr_record))
 
-                prs.append(self._map_github_pr(pr_record))
-
-            next_url = self._github_next_link(response.headers.get('Link'))
-            params = None
-
-        return prs
+        next_cursor = self._github_next_link(response.headers.get('Link'))
+        return records, next_cursor
 
     @staticmethod
     def _map_github_pr(pr_record):
@@ -743,9 +798,13 @@ class GitDiffExtractor(QWidget):
         if loading:
             self.pr_button.setText(message or "Working…")
             self.run_button.setText("Working…")
+            if self.load_more_button:
+                self.load_more_button.setText(message or "Working…")
         else:
             self.pr_button.setText(self._pr_button_label)
             self.run_button.setText(self._run_button_label)
+            if self.load_more_button:
+                self.load_more_button.setText(self._load_more_label)
 
         widgets = [
             self.pr_button,
@@ -755,6 +814,7 @@ class GitDiffExtractor(QWidget):
             self.only_pr_radio,
             self.only_merges_radio,
             self.all_diffs_radio,
+            self.load_more_button,
         ]
         for widget in widgets:
             widget.setEnabled(not loading)
