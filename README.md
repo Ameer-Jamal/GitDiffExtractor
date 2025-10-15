@@ -3,6 +3,7 @@
 ### **Overview**
 
 The **Git Diff Extractor** is a powerful desktop application designed to simplify the process of understanding and communicating changes made in Git repositories. Whether you're collaborating with team members or using AI tools to analyze code modifications, this app makes it easy to extract, search, and interpret **Git diffs** in a clear and structured way.
+<img width="819" height="949" alt="image" src="https://github.com/user-attachments/assets/5625785f-8f7c-4e7d-9b84-200467c74a6c" />
 
 ---
 
