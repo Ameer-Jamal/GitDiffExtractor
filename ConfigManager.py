@@ -2,13 +2,14 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from typing import Any, Optional
 
 from PyQt5.QtCore import QSettings
 
 
 class ConfigManager:
-    """Central storage for user preferences and per-repository settings."""
+    """Central storage for provider settings and per-repository preferences."""
 
     ORG_NAME = "GitDiffExtractor"
     APP_NAME = "GitDiffExtractor"
@@ -19,19 +20,41 @@ class ConfigManager:
         "last_repo_dir": "",
         "last_output_dir": "",
         "origin_branch": "",
-        "bitbucket_username": "",
-        "bitbucket_app_password": "",
-        "repo_slug": "",
         "commit_hashes": "",
         "pr_title": "",
         "source_branch": "",
         "target_branch": "",
+    }
+
+    DEFAULT_PROVIDER_CONFIG = {
         "provider": "bitbucket",
+        "bitbucket_username": "",
+        "bitbucket_app_password": "",
         "bitbucket_workspace": "",
         "github_owner": "",
         "github_repo": "",
-        "github_token": ""
+        "github_token": "",
+        "active_repo_provider": "",
+        "active_repo_id": "",
+        "active_repo_name": "",
+        "active_repo_owner": "",
+        "active_repo_slug": "",
+        "active_repo_clone_url": "",
+        "active_repo_html_url": "",
+        "active_repo_local_dir": "",
+        "selected_repositories_json": "[]",
+        "repo_discovery_cache_json": "{}",
     }
+    LEGACY_REPO_PROVIDER_KEYS = (
+        "provider",
+        "bitbucket_username",
+        "bitbucket_app_password",
+        "bitbucket_workspace",
+        "repo_slug",
+        "github_owner",
+        "github_repo",
+        "github_token",
+    )
 
     def __init__(self):
         self.settings = QSettings(self.ORG_NAME, self.APP_NAME)
@@ -56,7 +79,7 @@ class ConfigManager:
             return
 
         try:
-            with open(self.LEGACY_CONFIG_FILE, "r") as legacy_file:
+            with open(self.LEGACY_CONFIG_FILE, "r", encoding="utf-8") as legacy_file:
                 legacy_data = json.load(legacy_file)
         except Exception as exc:  # noqa: BLE001 - best effort migration
             print(f"Error migrating legacy config: {exc}")
@@ -69,6 +92,19 @@ class ConfigManager:
             self.settings.setValue("last_repo_dir", repo_dir)
             self.settings.setValue("last_output_dir", output_dir)
             self.current_repo = repo_dir
+
+            # Migrate provider fields to global settings
+            for key in (
+                "provider",
+                "bitbucket_username",
+                "bitbucket_app_password",
+                "bitbucket_workspace",
+                "github_owner",
+                "github_repo",
+                "github_token",
+            ):
+                if key in legacy_data:
+                    self.settings.setValue(key, legacy_data.get(key, ""))
 
             if repo_dir:
                 self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
@@ -93,11 +129,20 @@ class ConfigManager:
         config_path = self._repo_config_path(repo_dir)
         if os.path.exists(config_path):
             try:
-                with open(config_path, "r") as repo_file:
+                with open(config_path, "r", encoding="utf-8") as repo_file:
                     data = json.load(repo_file)
                     if isinstance(data, dict):
-                        self.repo_config.update({k: data.get(k, v)
-                                                 for k, v in self.DEFAULT_REPO_CONFIG.items()})
+                        had_legacy_provider_keys = self._migrate_repo_scoped_provider_values(data)
+                        self.repo_config.update(
+                            {
+                                k: data.get(k, v)
+                                for k, v in self.DEFAULT_REPO_CONFIG.items()
+                            }
+                        )
+                        if had_legacy_provider_keys:
+                            # Persist a cleaned repo config file without provider credentials.
+                            self.repo_config["last_repo_dir"] = repo_dir
+                            self._save_repo_config(repo_dir)
             except Exception as exc:  # noqa: BLE001 - prefer resilience
                 print(f"Error reading repo config '{config_path}': {exc}")
         else:
@@ -120,7 +165,9 @@ class ConfigManager:
             if config_dir and not os.path.exists(config_dir):
                 os.makedirs(config_dir)
 
-            with tempfile.NamedTemporaryFile("w", delete=False, dir=config_dir or None) as tmp_file:
+            with tempfile.NamedTemporaryFile(
+                "w", delete=False, dir=config_dir or None, encoding="utf-8"
+            ) as tmp_file:
                 json.dump(self.repo_config, tmp_file, indent=4)
                 temp_path = tmp_file.name
 
@@ -133,6 +180,29 @@ class ConfigManager:
             self.repo_config[key] = value
             self._save_repo_config()
 
+    def _migrate_repo_scoped_provider_values(self, data: dict) -> bool:
+        """
+        Move legacy provider credentials/config from repo-level config to global settings.
+        Returns True when repo data contained legacy provider keys and should be cleaned.
+        """
+        migrated = False
+        for key in self.LEGACY_REPO_PROVIDER_KEYS:
+            if key not in data:
+                continue
+            migrated = True
+            current_value = (self._get_global(key) or "").strip()
+            legacy_value = str(data.get(key, "") or "").strip()
+            if not current_value and legacy_value:
+                self._set_global(key, legacy_value)
+        return migrated
+
+    def _get_global(self, key: str) -> str:
+        default_value = self.DEFAULT_PROVIDER_CONFIG.get(key, "")
+        return self.settings.value(key, default_value, str)
+
+    def _set_global(self, key: str, value: str) -> None:
+        self.settings.setValue(key, value or "")
+
     # ------------------------------------------------------------------
     # Global values (stored in QSettings)
     def get_repo_dir(self) -> str:
@@ -141,6 +211,7 @@ class ConfigManager:
     def set_repo_dir(self, repo_dir: str) -> None:
         repo_dir = repo_dir or ""
         self.settings.setValue("last_repo_dir", repo_dir)
+        self._set_global("active_repo_local_dir", repo_dir)
         if repo_dir != self.current_repo:
             self.current_repo = repo_dir
             self._load_repo_config(repo_dir)
@@ -162,24 +233,6 @@ class ConfigManager:
 
     def set_origin_branch(self, origin_branch: str) -> None:
         self._update_repo_value("origin_branch", origin_branch)
-
-    def get_bitbucket_username(self) -> str:
-        return self.repo_config.get("bitbucket_username", "")
-
-    def set_bitbucket_username(self, username: str) -> None:
-        self._update_repo_value("bitbucket_username", username)
-
-    def get_bitbucket_app_password(self) -> str:
-        return self.repo_config.get("bitbucket_app_password", "")
-
-    def set_bitbucket_app_password(self, pwd: str) -> None:
-        self._update_repo_value("bitbucket_app_password", pwd)
-
-    def get_repo_slug(self) -> str:
-        return self.repo_config.get("repo_slug", "")
-
-    def set_repo_slug(self, slug: str) -> None:
-        self._update_repo_value("repo_slug", slug)
 
     def get_commit_hashes(self) -> str:
         return self.repo_config.get("commit_hashes", "")
@@ -205,34 +258,158 @@ class ConfigManager:
     def set_target_branch(self, branch: str) -> None:
         self._update_repo_value("target_branch", branch)
 
+    # ------------------------------------------------------------------
+    # Provider settings (global)
     def get_provider(self) -> str:
-        provider = self.repo_config.get("provider", "bitbucket")
+        provider = self._get_global("provider")
         return provider or "bitbucket"
 
     def set_provider(self, provider: str) -> None:
         provider = (provider or "bitbucket").lower()
-        self._update_repo_value("provider", provider)
+        self._set_global("provider", provider)
+
+    def get_bitbucket_username(self) -> str:
+        return self._get_global("bitbucket_username")
+
+    def set_bitbucket_username(self, username: str) -> None:
+        self._set_global("bitbucket_username", username)
+
+    def get_bitbucket_app_password(self) -> str:
+        return self._get_global("bitbucket_app_password")
+
+    def set_bitbucket_app_password(self, pwd: str) -> None:
+        self._set_global("bitbucket_app_password", pwd)
 
     def get_bitbucket_workspace(self) -> str:
-        return self.repo_config.get("bitbucket_workspace", "")
+        return self._get_global("bitbucket_workspace")
 
     def set_bitbucket_workspace(self, workspace: str) -> None:
-        self._update_repo_value("bitbucket_workspace", workspace)
+        self._set_global("bitbucket_workspace", workspace)
 
     def get_github_owner(self) -> str:
-        return self.repo_config.get("github_owner", "")
+        return self._get_global("github_owner")
 
     def set_github_owner(self, owner: str) -> None:
-        self._update_repo_value("github_owner", owner)
+        self._set_global("github_owner", owner)
 
     def get_github_repo(self) -> str:
-        return self.repo_config.get("github_repo", "")
+        return self._get_global("github_repo")
 
     def set_github_repo(self, repo: str) -> None:
-        self._update_repo_value("github_repo", repo)
+        self._set_global("github_repo", repo)
 
     def get_github_token(self) -> str:
-        return self.repo_config.get("github_token", "")
+        return self._get_global("github_token")
 
     def set_github_token(self, token: str) -> None:
-        self._update_repo_value("github_token", token)
+        self._set_global("github_token", token)
+
+    # ------------------------------------------------------------------
+    # Active repository metadata (global)
+    def set_active_repository(self, repo_info: dict) -> None:
+        repo = repo_info or {}
+        self._set_global("active_repo_provider", repo.get("provider", ""))
+        self._set_global("active_repo_id", str(repo.get("id", "")))
+        self._set_global("active_repo_name", repo.get("name", ""))
+        self._set_global("active_repo_owner", repo.get("owner", ""))
+        self._set_global("active_repo_slug", repo.get("slug", ""))
+        self._set_global("active_repo_clone_url", repo.get("clone_url", ""))
+        self._set_global("active_repo_html_url", repo.get("html_url", ""))
+        self._set_global("active_repo_local_dir", repo.get("local_dir", ""))
+
+        local_dir = repo.get("local_dir", "")
+        if local_dir:
+            self.set_repo_dir(local_dir)
+
+    def get_active_repository(self) -> dict:
+        return {
+            "provider": self._get_global("active_repo_provider"),
+            "id": self._get_global("active_repo_id"),
+            "name": self._get_global("active_repo_name"),
+            "owner": self._get_global("active_repo_owner"),
+            "slug": self._get_global("active_repo_slug"),
+            "clone_url": self._get_global("active_repo_clone_url"),
+            "html_url": self._get_global("active_repo_html_url"),
+            "local_dir": self._get_global("active_repo_local_dir"),
+        }
+
+    def clear_active_repository(self) -> None:
+        self.set_active_repository({})
+        self.set_repo_dir("")
+
+    def get_selected_repositories(self) -> list:
+        raw = self._get_global("selected_repositories_json")
+        try:
+            parsed = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    def set_selected_repositories(self, repositories: list) -> None:
+        payload = repositories if isinstance(repositories, list) else []
+        self._set_global("selected_repositories_json", json.dumps(payload))
+
+    def _get_discovery_cache(self) -> dict:
+        raw = self._get_global("repo_discovery_cache_json")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _set_discovery_cache(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        self._set_global("repo_discovery_cache_json", json.dumps(payload))
+
+    @staticmethod
+    def _provider_cache_key(provider: str, context_key: str) -> str:
+        return f"{(provider or '').lower()}::{context_key or ''}"
+
+    def get_cached_discovered_repositories(self, provider: str, context_key: str) -> tuple:
+        cache = self._get_discovery_cache()
+        key = self._provider_cache_key(provider, context_key)
+        entry = cache.get(key) or {}
+        if not isinstance(entry, dict):
+            return [], 0.0
+        repos = entry.get("repositories")
+        timestamp = entry.get("timestamp")
+        if not isinstance(repos, list):
+            repos = []
+        try:
+            ts = float(timestamp or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        return repos, ts
+
+    def set_cached_discovered_repositories(self, provider: str, context_key: str, repositories: list) -> None:
+        cache = self._get_discovery_cache()
+        key = self._provider_cache_key(provider, context_key)
+        cache[key] = {
+            "timestamp": time.time(),
+            "repositories": repositories if isinstance(repositories, list) else [],
+        }
+        self._set_discovery_cache(cache)
+
+    def get_managed_repo_root(self) -> str:
+        stored = self.settings.value("managed_repo_root", "", str)
+        if stored:
+            return stored
+        return os.path.join(os.path.expanduser("~"), ".gitdiffextractor", "repos")
+
+    def set_managed_repo_root(self, path: str) -> None:
+        self.settings.setValue("managed_repo_root", path or "")
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers
+    def get_repo_slug(self) -> str:
+        active_slug = self._get_global("active_repo_slug")
+        if active_slug:
+            return active_slug
+        return self.get_github_repo() if self.get_provider() == "github" else ""
+
+    def set_repo_slug(self, slug: str) -> None:
+        slug = (slug or "").strip()
+        provider = self.get_provider()
+        if provider == "github":
+            self.set_github_repo(slug)
+        self._set_global("active_repo_slug", slug)

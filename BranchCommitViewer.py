@@ -1,15 +1,18 @@
 import os
 import platform
 import subprocess
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QPushButton,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QLabel,
 )
+from ListDelegates import BranchListDelegate, UI_ROLE
 
 
 class BranchCommitViewer(QWidget):
@@ -20,13 +23,17 @@ class BranchCommitViewer(QWidget):
 
         self.config_manager = config_manager
         self.task_runner = task_runner
+        self._branch_entries = []
 
         layout = QVBoxLayout()
 
-        # UI for repository input
+        self.repo_context_label = QLabel(self)
+        layout.addWidget(self.repo_context_label)
+
+        # Active repository (selected in Settings)
         self.repo_input = QLineEdit(self)
-        self.repo_input.setPlaceholderText('Enter repository path')
-        self.repo_input.editingFinished.connect(self._on_repo_finished)
+        self.repo_input.setPlaceholderText('Select active repository in Settings')
+        self.repo_input.setReadOnly(True)
         layout.addWidget(self.repo_input)
 
         # Base Branch Input
@@ -54,6 +61,7 @@ class BranchCommitViewer(QWidget):
         # List to display branches
         self.branch_list = QListWidget(self)
         self.branch_list.itemDoubleClicked.connect(self.loadCommitsForBranch)
+        self.branch_list.setItemDelegate(BranchListDelegate(self.branch_list))
         layout.addWidget(self.branch_list)
 
         # Button to get all commits for the selected branch
@@ -71,8 +79,17 @@ class BranchCommitViewer(QWidget):
     def apply_repo_config(self):
         repo_dir = self.config_manager.get_repo_dir()
         origin_branch = self.config_manager.get_origin_branch()
+        selected_count = len(self.config_manager.get_selected_repositories())
 
         self._set_line_edit_text(self.repo_input, repo_dir)
+        if selected_count > 1:
+            self.repo_context_label.setText(
+                f"Showing branches across {selected_count} selected repositories."
+            )
+        elif selected_count == 1:
+            self.repo_context_label.setText("Showing branches for selected repository.")
+        else:
+            self.repo_context_label.setText("No repository selected.")
         if origin_branch:
             self._set_line_edit_text(self.base_branch_input, origin_branch)
         else:
@@ -87,32 +104,48 @@ class BranchCommitViewer(QWidget):
     # ------------------------------------------------------------------
     # UI Callbacks
     def loadBranches(self):
-        repo_dir = self.repo_input.text().strip()
-        if not repo_dir:
-            QMessageBox.warning(self, "Input Error", "Repository path must be provided.")
+        selected_repos = self._selected_repositories()
+        if not selected_repos:
+            QMessageBox.warning(
+                self,
+                "Input Error",
+                "No repositories selected. Select repositories in Settings first.",
+            )
             return
 
         if not self.task_runner:
-            self._load_branches_sync(repo_dir)
+            self._load_branches_sync(selected_repos)
             return
 
         self._set_loading_state(True, self.load_branches_button, "Loading branches…")
 
         def task():
-            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
-            result = subprocess.run(
-                ['git', 'branch', '-r'],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=repo_dir,
-            )
-            return [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
+            entries = []
+            for repo in selected_repos:
+                repo_dir = (repo.get("local_dir") or "").strip()
+                if not repo_dir:
+                    continue
+                subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
+                result = subprocess.run(
+                    ['git', 'branch', '-r'],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    cwd=repo_dir,
+                )
+                repo_label = f"{repo.get('owner', '')}/{repo.get('slug', repo.get('name', ''))}"
+                branches = [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
+                for branch in branches:
+                    entries.append({
+                        "repo": repo,
+                        "repo_dir": repo_dir,
+                        "repo_label": repo_label,
+                        "branch": branch,
+                    })
+            return entries
 
-        def on_result(branches):
-            self.branch_list.clear()
-            for branch in branches:
-                self.branch_list.addItem(branch)
+        def on_result(entries):
+            self._render_branches(entries)
 
         def on_error(exc: Exception):
             QMessageBox.critical(self, "Error", f"An error occurred while loading branches:\n{exc}")
@@ -132,19 +165,19 @@ class BranchCommitViewer(QWidget):
             item.setHidden(search_term not in item.text().lower())
 
     def loadCommitsForBranch(self, item):
-        branch_name = item.text().strip()
-        self.getCommitsForBranch(branch_name)
+        payload = item.data(Qt.UserRole) or {}
+        self.getCommitsForBranch(payload.get("branch"), payload.get("repo_dir"), payload.get("repo_label"))
 
     def loadCommitsForSelectedBranch(self):
         selected_items = self.branch_list.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "Error", "No branch selected.")
             return
-        branch_name = selected_items[0].text().strip()
-        self.getCommitsForBranch(branch_name)
+        payload = selected_items[0].data(Qt.UserRole) or {}
+        self.getCommitsForBranch(payload.get("branch"), payload.get("repo_dir"), payload.get("repo_label"))
 
-    def getCommitsForBranch(self, branch_name):
-        repo_dir = self.repo_input.text().strip()
+    def getCommitsForBranch(self, branch_name, repo_dir=None, repo_label=None):
+        repo_dir = (repo_dir or self.repo_input.text().strip()).strip()
         base_branch = self.base_branch_input.text().strip()
         output_dir = self.config_manager.get_output_dir().strip()
 
@@ -208,7 +241,8 @@ class BranchCommitViewer(QWidget):
             QMessageBox.information(
                 self,
                 "Success",
-                f"All diffs for branch {resolved_branch} saved to {diff_file_path}.",
+                f"All diffs for branch {resolved_branch} "
+                f"{f'({repo_label}) ' if repo_label else ''}saved to {diff_file_path}.",
             )
             self.openFile(diff_file_path)
 
@@ -261,20 +295,31 @@ class BranchCommitViewer(QWidget):
         for widget in widgets:
             widget.setEnabled(not loading)
 
-    def _load_branches_sync(self, repo_dir):
+    def _load_branches_sync(self, selected_repos):
         try:
-            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
-            result = subprocess.run(
-                ['git', 'branch', '-r'],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=repo_dir,
-            )
-            branches = [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
-            self.branch_list.clear()
-            for branch in branches:
-                self.branch_list.addItem(branch)
+            entries = []
+            for repo in selected_repos:
+                repo_dir = (repo.get("local_dir") or "").strip()
+                if not repo_dir:
+                    continue
+                subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
+                result = subprocess.run(
+                    ['git', 'branch', '-r'],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    cwd=repo_dir,
+                )
+                repo_label = f"{repo.get('owner', '')}/{repo.get('slug', repo.get('name', ''))}"
+                branches = [branch.strip() for branch in result.stdout.strip().splitlines() if branch.strip()]
+                for branch in branches:
+                    entries.append({
+                        "repo": repo,
+                        "repo_dir": repo_dir,
+                        "repo_label": repo_label,
+                        "branch": branch,
+                    })
+            self._render_branches(entries)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Error", f"An error occurred while loading branches:\n{exc}")
 
@@ -322,14 +367,32 @@ class BranchCommitViewer(QWidget):
             return
 
         # Set the selected branch as the base/origin branch
-        selected_branch = selected_items[0].text().strip()
+        payload = selected_items[0].data(Qt.UserRole) or {}
+        selected_branch = payload.get("branch") or selected_items[0].text().strip()
         self.base_branch_input.setText(selected_branch)
         self.config_manager.set_origin_branch(selected_branch)
-
-    def _on_repo_finished(self):
-        repo_dir = self.repo_input.text().strip()
-        self.repoChanged.emit(repo_dir)
 
     def _store_origin_branch(self):
         origin_branch = self.base_branch_input.text().strip()
         self.config_manager.set_origin_branch(origin_branch)
+
+    def _selected_repositories(self):
+        selected = self.config_manager.get_selected_repositories() or []
+        if selected:
+            return selected
+        active = self.config_manager.get_active_repository() or {}
+        return [active] if active.get("id") else []
+
+    def _render_branches(self, entries):
+        self._branch_entries = entries or []
+        self.branch_list.clear()
+        self.branch_list.setUpdatesEnabled(False)
+        for entry in self._branch_entries:
+            repo_label = entry.get('repo_label', 'repo')
+            branch_name = entry.get('branch', '')
+            item = QListWidgetItem()
+            item.setText(f"{repo_label} {branch_name}".lower())
+            item.setData(Qt.UserRole, entry)
+            item.setData(UI_ROLE, {"repo_label": repo_label, "branch": branch_name})
+            self.branch_list.addItem(item)
+        self.branch_list.setUpdatesEnabled(True)
