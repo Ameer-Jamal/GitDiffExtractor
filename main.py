@@ -6,13 +6,16 @@ import textwrap
 import time
 
 import requests
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
-                             QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup)
+                             QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup, QProgressDialog)
 from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
 from CreatePrTab import CreatePRTab
+from ListDelegates import PRListDelegate, UI_ROLE
+from PRAggregationService import PRAggregationService
+from RepositoryProvider import RepositoryProvider
 from SettingsTab import SettingsTab
 from TaskRunner import TaskRunner
 
@@ -43,9 +46,17 @@ class GitDiffExtractor(QWidget):
         self._pr_cache = {}
         self._pr_cache_ttl = 60  # seconds
         self._pagination_state = None
+        self._pr_page_loading = False
+        self._pr_search_timer = None
+        self._last_remote_search_key = None
+        self._remote_search_inflight = False
         self._current_provider = None
         self._current_filter_mode = None
         self._current_provider_config = None
+        self._current_selected_repos = []
+        self._current_cursor_state = {}
+        self._repo_activation_in_progress = False
+        self._repo_progress_dialog = None
         self.task_runner = TaskRunner(self)
         # Initialize the QTabWidget
         self.tabs = QTabWidget()
@@ -56,12 +67,11 @@ class GitDiffExtractor(QWidget):
         # Build tabs
         self.pr_tab_widget = self.prExtractDiffWidget()
         self.branch_viewer = BranchCommitViewer(self.config_manager, self.task_runner)
-        self.branch_viewer.repoChanged.connect(self.on_repo_changed)
         self.create_pr_tab = CreatePRTab(self.config_manager, self.task_runner)
-        self.create_pr_tab.repoChanged.connect(self.on_repo_changed)
-        self.settings_tab = SettingsTab(self.config_manager)
+        self.settings_tab = SettingsTab(self.config_manager, self.task_runner)
         self.settings_tab.providerChanged.connect(self._on_provider_updated)
         self.settings_tab.settingsUpdated.connect(self._on_settings_updated)
+        self.settings_tab.activeRepositoriesChanged.connect(self._on_active_repositories_selected)
 
         # Add both tabs to the QTabWidget
         self.tabs.addTab(self.pr_tab_widget, "PR Diff Extractor")  # Default tab
@@ -75,6 +85,7 @@ class GitDiffExtractor(QWidget):
         self.setLayout(main_layout)
 
         self.apply_repo_config()
+        self._initialize_active_repository()
 
     def initUI(self):
         self.setWindowTitle('Git Diff Extractor')
@@ -85,17 +96,15 @@ class GitDiffExtractor(QWidget):
         pr_widget = QWidget()
         layout = QVBoxLayout(pr_widget)
 
-        # Repository Directory
+        # Active Repository
         repo_layout = QHBoxLayout()
-        self.repo_label = QLabel('Repository Directory:')
+        self.repo_label = QLabel('Primary Repository Directory:')
         repo_layout.addWidget(self.repo_label)
         self.repo_input = QLineEdit(self)
-        self.repo_input.setText(self.config_manager.get_repo_dir())  # Load last used repo dir
-        self.repo_input.editingFinished.connect(self._handle_repo_edit)
+        self.repo_input.setText(self.config_manager.get_repo_dir())
+        self.repo_input.setReadOnly(True)
+        self.repo_input.setPlaceholderText('Select active repository in Settings')
         repo_layout.addWidget(self.repo_input)
-        self.repo_button = QPushButton('Browse', self)
-        self.repo_button.clicked.connect(self.browseRepo)
-        repo_layout.addWidget(self.repo_button)
         layout.addLayout(repo_layout)
 
         # Commit Hashes
@@ -123,13 +132,15 @@ class GitDiffExtractor(QWidget):
         # Search Bar for PRs
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("Search PRs")
-        self.search_input.textChanged.connect(self.searchPRs)
+        self.search_input.textChanged.connect(self._on_pr_search_text_changed)
         layout.addWidget(self.search_input)
 
         # List of Pull Requests
         self.pr_list = QListWidget(self)
         self.pr_list.itemClicked.connect(self.onPRClick)
         self.pr_list.itemDoubleClicked.connect(self.generateDiff)
+        self.pr_list.verticalScrollBar().valueChanged.connect(self._on_pr_list_scrolled)
+        self.pr_list.setItemDelegate(PRListDelegate(self.pr_list))
         layout.addWidget(self.pr_list)
 
         # Load PRs Button
@@ -141,6 +152,7 @@ class GitDiffExtractor(QWidget):
         self.load_more_button = QPushButton('Load More', self)
         self.load_more_button.clicked.connect(self.loadMorePRs)
         self.load_more_button.setEnabled(False)
+        self.load_more_button.setVisible(False)
         layout.addWidget(self.load_more_button)
         self._load_more_label = self.load_more_button.text()
 
@@ -168,12 +180,15 @@ class GitDiffExtractor(QWidget):
         self.run_button.clicked.connect(self.generateDiff)
         layout.addWidget(self.run_button)
         self._run_button_label = self.run_button.text()
+        self._pr_search_timer = QTimer(self)
+        self._pr_search_timer.setSingleShot(True)
+        self._pr_search_timer.timeout.connect(self._perform_debounced_pr_search)
 
         pr_widget.setLayout(layout)  # Set the layout for the pr_widget
         return pr_widget
 
     def getPRDiffs(self):
-        repo_dir = self.repo_input.text()
+        repo_dir = self._require_active_repo_dir()
         pr_merge_commit = self.commit_input.text().strip()
         output_dir = self.output_input.text()
 
@@ -207,12 +222,6 @@ class GitDiffExtractor(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
-    def browseRepo(self):
-        directory = self.selectDirectory("Select Repository Directory")
-        if directory:
-            self.repo_input.setText(directory)
-            self.on_repo_changed(directory)
-
     def browseOutput(self):
         directory = self.selectDirectory("Select Output Directory")
         if directory:
@@ -224,11 +233,11 @@ class GitDiffExtractor(QWidget):
         return QFileDialog.getExistingDirectory(self, title)
 
     def generateDiff(self):
-        repo_dir = self.repo_input.text().strip()
+        repo_dir = self._require_active_repo_dir()
         output_dir = self.output_input.text().strip()
 
         if not repo_dir or not output_dir:
-            QMessageBox.warning(self, INPUT_ERROR, "Repository and output directories must be provided.")
+            QMessageBox.warning(self, INPUT_ERROR, "Active repository and output directories must be provided.")
             return
 
         os.makedirs(output_dir, exist_ok=True)
@@ -237,6 +246,9 @@ class GitDiffExtractor(QWidget):
         if selected_item is not None:
             pr_data = selected_item.data(Qt.UserRole)
             if isinstance(pr_data, dict):
+                selected_repo_dir = (pr_data.get('repo_local_dir') or '').strip()
+                if selected_repo_dir and os.path.isdir(selected_repo_dir):
+                    repo_dir = selected_repo_dir
                 if self.task_runner:
                     self._generate_diff_async(repo_dir, output_dir, pr_data=pr_data)
                 else:
@@ -276,34 +288,44 @@ class GitDiffExtractor(QWidget):
             QMessageBox.critical(self, "Error", f"An unexpected error occurred:\n{exc}")
 
     def listPRs(self):
-        repo_dir = self.repo_input.text().strip()
-
-        if not repo_dir:
-            QMessageBox.warning(self, INPUT_ERROR, "Repository directory must be filled out.")
-            return
+        selected_repos = self.config_manager.get_selected_repositories()
+        if not selected_repos:
+            repo_dir = self._require_active_repo_dir()
+            if not repo_dir:
+                return
+            selected_repos = [self.config_manager.get_active_repository()]
 
         provider = (self.config_manager.get_provider() or 'bitbucket').lower()
+        repo_ids = [str((repo or {}).get('id', '')) for repo in selected_repos if (repo or {}).get('id')]
+        if not repo_ids:
+            QMessageBox.warning(self, INPUT_ERROR, "No selected repositories were found. Select repositories in Settings.")
+            return
+
         filter_mode = self._selected_filter()
 
         if provider == 'github':
-            provider_config = self._get_github_config()
+            provider_base_config = self._get_github_config(repo=selected_repos[0], show_dialog=True)
         else:
-            provider_config = self._get_bitbucket_config()
+            provider_base_config = self._get_bitbucket_config(repo=selected_repos[0], show_dialog=True)
 
-        if not provider_config:
+        if not provider_base_config:
             return
 
         self._current_provider = provider
         self._current_filter_mode = filter_mode
-        self._current_provider_config = provider_config
+        self._current_provider_config = provider_base_config
+        self._current_selected_repos = selected_repos
+        self._current_cursor_state = PRAggregationService.seed_cursor_state(selected_repos)
+        self._last_remote_search_key = None
 
-        cache_key = (provider, filter_mode)
+        cache_key = (provider, tuple(sorted(repo_ids)), filter_mode)
         cached = self._pr_cache.get(cache_key)
         if cached:
             timestamp, cached_prs, cached_next = cached
             if time.time() - timestamp < self._pr_cache_ttl:
                 self.prs = list(cached_prs)
                 self._pagination_state = cached_next
+                self._current_cursor_state = cached_next or {}
                 if not self.prs:
                     QMessageBox.information(
                         self,
@@ -316,32 +338,41 @@ class GitDiffExtractor(QWidget):
 
         self.prs = []
         self.pr_list.clear()
-        self._pagination_state = None
+        self._pagination_state = PRAggregationService.seed_cursor_state(selected_repos)
+        self._current_cursor_state = dict(self._pagination_state)
         self.load_more_button.setEnabled(False)
 
         self._load_pr_page(reset=True)
 
-    def loadMorePRs(self):
+    def loadMorePRs(self, auto=False):
         if not self._current_provider or not self._current_provider_config:
-            QMessageBox.warning(self, INPUT_ERROR, "Load pull requests before requesting more results.")
+            if not auto:
+                QMessageBox.warning(self, INPUT_ERROR, "Load pull requests before requesting more results.")
             return
 
-        if not self._pagination_state:
+        if not PRAggregationService.has_more(self._current_cursor_state):
             self.load_more_button.setEnabled(False)
-            QMessageBox.information(self, "No More Results", "All pull requests have been loaded.")
+            if not auto:
+                QMessageBox.information(self, "No More Results", "All pull requests have been loaded.")
             return
 
         self._load_pr_page(reset=False)
 
     def _load_pr_page(self, reset):
+        if self._pr_page_loading:
+            return
+
+        self._pr_page_loading = True
         provider = self._current_provider
         filter_mode = self._current_filter_mode
         config = self._current_provider_config
+        selected_repos = getattr(self, '_current_selected_repos', [])
 
-        if not provider or not config:
+        if not provider or not config or not selected_repos:
+            self._pr_page_loading = False
             return
 
-        next_cursor = None if reset else self._pagination_state
+        cursor_state = dict(self._current_cursor_state or {})
 
         def handle_result(result):
             records, next_token = result
@@ -351,26 +382,73 @@ class GitDiffExtractor(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
 
         def execute_fetch():
-            if provider == 'github':
-                return self._fetch_github_pull_requests_page(filter_mode, config, next_cursor)
-            return self._fetch_bitbucket_pull_requests_page(filter_mode, config, next_cursor)
+            aggregated_records = []
+            next_tokens = {}
+            repo_fetch_pairs = PRAggregationService.repos_for_page(selected_repos, cursor_state, reset)
+            for repo, repo_next in repo_fetch_pairs:
+                repo_id = str((repo or {}).get('id', ''))
+                repo_owner = (repo or {}).get('owner', '')
+                repo_slug = (repo or {}).get('slug', (repo or {}).get('name', ''))
+                repo_label = f"{repo_owner}/{repo_slug}"
+                repo_local_dir = (repo or {}).get('local_dir', '')
+
+                if provider == 'github':
+                    repo_config = self._get_github_config(repo=repo, show_dialog=False)
+                else:
+                    repo_config = self._get_bitbucket_config(repo=repo, show_dialog=False)
+
+                if not repo_config:
+                    continue
+
+                try:
+                    if provider == 'github':
+                        repo_records, repo_next_token = self._fetch_github_pull_requests_page(
+                            filter_mode, repo_config, repo_next
+                        )
+                    else:
+                        repo_records, repo_next_token = self._fetch_bitbucket_pull_requests_page(
+                            filter_mode, repo_config, repo_next
+                        )
+                except Exception:
+                    # Keep aggregated loading resilient when one repository fails.
+                    continue
+
+                for pr in repo_records:
+                    pr['repo_id'] = repo_id
+                    pr['repo_label'] = repo_label
+                    pr['repo_local_dir'] = repo_local_dir
+                aggregated_records.extend(repo_records)
+
+                next_tokens[repo_id] = repo_next_token or ''
+
+            aggregated_records.sort(key=lambda pr: pr.get('updated_on') or '', reverse=True)
+            normalized_state = PRAggregationService.normalize_next_state(selected_repos, next_tokens)
+            return aggregated_records, normalized_state
 
         if not self.task_runner:
             try:
                 handle_result(execute_fetch())
             except Exception as exc:  # noqa: BLE001
                 handle_error(exc)
+            finally:
+                self._pr_page_loading = False
+                self._auto_load_more_if_needed()
             return
 
         message = "Loading…" if reset else "Loading more…"
         self._set_pr_loading(True, message)
+
+        def on_finished():
+            self._pr_page_loading = False
+            self._set_pr_loading(False)
+            self._auto_load_more_if_needed()
 
         self.task_runner.run(
             execute_fetch,
             description="Load Pull Requests" if reset else "Load More Pull Requests",
             on_result=handle_result,
             on_error=handle_error,
-            on_finished=lambda: self._set_pr_loading(False),
+            on_finished=on_finished,
         )
 
     def _handle_pr_page_result(self, records, next_cursor, reset):
@@ -383,22 +461,23 @@ class GitDiffExtractor(QWidget):
         if reset and not self.prs:
             QMessageBox.information(self, "No Results", "No pull requests matched the current filters.")
 
-        search_query = self.search_input.text().strip()
-        if search_query:
-            self.searchPRs()
+        if reset:
+            self.displayPRs()
         else:
-            if reset:
-                self.displayPRs()
-            else:
-                self.displayPRs(records, append=True)
+            self.displayPRs(records, append=True)
+
+        self.searchPRs()
 
         if not records and not reset:
             QMessageBox.information(self, "No More Results", "No additional pull requests were returned.")
 
         self._pagination_state = next_cursor
-        self.load_more_button.setEnabled(bool(next_cursor))
+        self._current_cursor_state = dict(next_cursor or {})
+        self.load_more_button.setEnabled(PRAggregationService.has_more(self._current_cursor_state))
 
-        cache_key = (self._current_provider, self._current_filter_mode)
+        active_repo = self.config_manager.get_active_repository()
+        repo_ids = [str((repo or {}).get('id', '')) for repo in getattr(self, '_current_selected_repos', []) if (repo or {}).get('id')]
+        cache_key = (self._current_provider, tuple(sorted(repo_ids)), self._current_filter_mode)
         self._pr_cache[cache_key] = (
             time.time(),
             list(self.prs),
@@ -413,6 +492,7 @@ class GitDiffExtractor(QWidget):
             self.pr_list.clear()
             records = prs if prs is not None else self.prs
 
+        self.pr_list.setUpdatesEnabled(False)
         for pr in records:
             pr_id = pr.get('id', 'Unknown')
             raw_title = pr.get('title') or ''
@@ -423,45 +503,227 @@ class GitDiffExtractor(QWidget):
             author = pr.get('author') or 'Unknown author'
             summary = textwrap.shorten(title, width=100, placeholder='…')
             provider_label = (pr.get('provider') or '').capitalize()
+            repo_label = pr.get('repo_label') or ''
 
             header = f"PR #{pr_id} · {state}"
             if provider_label:
                 header = f"{header} [{provider_label}]"
 
-            item_text = (
-                f"{header}\n"
-                f"{source_branch} ⟶ {destination_branch}\n"
-                f"Title: {summary}\n"
-                f"Author: {author}\n"
-                f"{'_' * 75}"
-            )
-
-            item = QListWidgetItem(item_text)
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, pr)
+            descriptor = (
+                f"{header} {repo_label} {source_branch} {destination_branch} "
+                f"{title} {author} {(pr.get('description') or '')}"
+            ).lower()
+            item.setData(Qt.UserRole + 1, descriptor)
+            item.setData(
+                UI_ROLE,
+                {
+                    "header": header,
+                    "repo_label": repo_label or "Unknown",
+                    "branch_line": f"{source_branch} -> {destination_branch}",
+                    "title": summary,
+                    "author": author,
+                },
+            )
+            item.setText(descriptor)
             self.pr_list.addItem(item)
+        self.pr_list.setUpdatesEnabled(True)
 
     def searchPRs(self):
         """Filter PRs based on the search input."""
         query = self.search_input.text().strip().lower()
+        local_matches = self._apply_local_pr_filter(query)
+
         if not query:
-            self.displayPRs()
+            self._last_remote_search_key = None
             return
 
-        filtered = []
-        for pr in self.prs:
-            fields = [
-                str(pr.get('id', '')),
-                pr.get('title') or '',
-                pr.get('state') or '',
-                pr.get('source_branch') or '',
-                pr.get('destination_branch') or '',
-                pr.get('author') or '',
-            ]
-            descriptor = ' '.join(f.lower() for f in fields)
-            if query in descriptor:
-                filtered.append(pr)
+        if local_matches > 0:
+            return
 
-        self.displayPRs(filtered)
+        self._trigger_remote_pr_search(query)
+
+    def _on_pr_search_text_changed(self):
+        # Instant local filtering for responsiveness.
+        query = self.search_input.text().strip().lower()
+        self._apply_local_pr_filter(query)
+        if not query:
+            self._last_remote_search_key = None
+            return
+
+        if self._pr_search_timer:
+            self._pr_search_timer.start(250)
+        else:
+            self._perform_debounced_pr_search()
+
+    def _perform_debounced_pr_search(self):
+        self.searchPRs()
+
+    def _apply_local_pr_filter(self, query):
+        local_matches = 0
+        for i in range(self.pr_list.count()):
+            item = self.pr_list.item(i)
+            descriptor = item.data(Qt.UserRole + 1) or ""
+            is_match = (not query) or (query in descriptor)
+            item.setHidden(not is_match)
+            if is_match:
+                local_matches += 1
+        return local_matches
+
+    def _trigger_remote_pr_search(self, query):
+        provider = self._current_provider or (self.config_manager.get_provider() or 'bitbucket').lower()
+        filter_mode = self._current_filter_mode or self._selected_filter()
+        selected_repos = getattr(self, '_current_selected_repos', []) or self.config_manager.get_selected_repositories()
+        repo_ids = tuple(sorted(str((repo or {}).get('id', '')) for repo in selected_repos if (repo or {}).get('id')))
+        search_key = (provider, filter_mode, repo_ids, query)
+
+        if self._remote_search_inflight:
+            return
+
+        self._last_remote_search_key = search_key
+        self._remote_search_inflight = True
+
+        def on_result(remote_records):
+            self._remote_search_inflight = False
+            current_query = self.search_input.text().strip().lower()
+            if current_query != query:
+                return
+
+            if not remote_records:
+                return
+
+            existing_ids = {
+                (str(pr.get('repo_id', '')), str(pr.get('id', '')))
+                for pr in self.prs
+            }
+            new_records = []
+            for pr in remote_records:
+                key = (str(pr.get('repo_id', '')), str(pr.get('id', '')))
+                if key in existing_ids:
+                    continue
+                existing_ids.add(key)
+                new_records.append(pr)
+
+            if not new_records:
+                return
+
+            self.prs.extend(new_records)
+            self.displayPRs(new_records, append=True)
+            self.searchPRs()
+
+        def on_error(_exc: Exception):
+            self._remote_search_inflight = False
+            self._last_remote_search_key = None
+
+        def task():
+            return self._search_prs_remote(provider, filter_mode, selected_repos, query)
+
+        if self.task_runner:
+            self.task_runner.run(
+                task,
+                description="Search Pull Requests",
+                on_result=on_result,
+                on_error=on_error,
+            )
+            return
+
+        try:
+            on_result(task())
+        except Exception as exc:  # noqa: BLE001
+            on_error(exc)
+
+    def _search_prs_remote(self, provider, filter_mode, selected_repos, query):
+        results = []
+        if provider == 'bitbucket':
+            username = (self.config_manager.get_bitbucket_username() or '').strip()
+            password = (self.config_manager.get_bitbucket_app_password() or '').strip()
+            if not username or not password:
+                return results
+
+            state_clause = ''
+            if filter_mode == 'open':
+                state_clause = ' AND state = "OPEN"'
+            elif filter_mode == 'merged':
+                state_clause = ' AND state = "MERGED"'
+
+            escaped_query = query.replace('"', '\\"')
+            q = (
+                f'(title ~ "{escaped_query}" OR source.branch.name ~ "{escaped_query}" '
+                f'OR destination.branch.name ~ "{escaped_query}"){state_clause}'
+            )
+
+            for repo in selected_repos:
+                workspace = (repo.get('owner') or '').strip()
+                slug = (repo.get('slug') or '').strip()
+                if not workspace or not slug:
+                    continue
+                url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
+                try:
+                    response = requests.get(
+                        url,
+                        params={'pagelen': 30, 'q': q},
+                        auth=(username, password),
+                        timeout=15,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    repo_label = f"{workspace}/{slug}"
+                    repo_local_dir = (repo.get('local_dir') or '').strip()
+                    for pr in payload.get('values', []):
+                        mapped = self._map_bitbucket_pr(pr)
+                        mapped['repo_id'] = str(repo.get('id', ''))
+                        mapped['repo_label'] = repo_label
+                        mapped['repo_local_dir'] = repo_local_dir
+                        results.append(mapped)
+                except Exception:
+                    continue
+            return results
+
+        token = (self.config_manager.get_github_token() or '').strip()
+        headers = {'Accept': 'application/vnd.github+json'}
+        if token:
+            headers['Authorization'] = f'token {token}'
+
+        state_term = ''
+        if filter_mode == 'open':
+            state_term = 'state:open'
+        elif filter_mode == 'merged':
+            state_term = 'state:closed'
+
+        for repo in selected_repos:
+            owner = (repo.get('owner') or '').strip()
+            slug = (repo.get('slug') or repo.get('name') or '').strip()
+            if not owner or not slug:
+                continue
+            search_query = f'repo:{owner}/{slug} is:pr {state_term} {query}'.strip()
+            try:
+                response = requests.get(
+                    "https://api.github.com/search/issues",
+                    params={'q': search_query, 'per_page': 30},
+                    headers=headers,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                repo_label = f"{owner}/{slug}"
+                repo_local_dir = (repo.get('local_dir') or '').strip()
+
+                for issue in payload.get('items', []):
+                    pr_url = (issue.get('pull_request') or {}).get('url')
+                    if not pr_url:
+                        continue
+                    pr_response = requests.get(pr_url, headers=headers, timeout=15)
+                    pr_response.raise_for_status()
+                    mapped = self._map_github_pr(pr_response.json())
+                    mapped['repo_id'] = str(repo.get('id', ''))
+                    mapped['repo_label'] = repo_label
+                    mapped['repo_local_dir'] = repo_local_dir
+                    results.append(mapped)
+            except Exception:
+                continue
+
+        return results
 
     def _on_settings_updated(self):
         self._pr_cache.clear()
@@ -469,10 +731,15 @@ class GitDiffExtractor(QWidget):
 
     def _on_provider_updated(self, provider):
         provider = (provider or 'bitbucket').lower()
+        active_repo = self.config_manager.get_active_repository()
+        if (active_repo.get('provider') or '').lower() != provider:
+            self.config_manager.clear_active_repository()
+            self.config_manager.set_selected_repositories([])
         self.create_pr_tab.setEnabled(provider == 'bitbucket')
         self._pr_cache.clear()
         self.prs = []
         self.pr_list.clear()
+        self.apply_repo_config()
 
     def _selected_filter(self):
         if self.only_pr_radio.isChecked():
@@ -481,33 +748,35 @@ class GitDiffExtractor(QWidget):
             return 'merged'
         return 'all'
 
-    def _get_bitbucket_config(self):
+    def _get_bitbucket_config(self, repo=None, show_dialog=True):
         username = (self.config_manager.get_bitbucket_username() or '').strip()
         password = (self.config_manager.get_bitbucket_app_password() or '').strip()
-        slug = (self.config_manager.get_repo_slug() or '').strip()
+        active_repo = repo or self.config_manager.get_active_repository()
+        slug = (active_repo.get('slug') or '').strip()
+        active_workspace = (active_repo.get('owner') or '').strip()
         workspace = (self.config_manager.get_bitbucket_workspace() or '').strip()
-        workspace = workspace or DEFAULT_BITBUCKET_WORKSPACE
+        workspace = active_workspace or workspace or DEFAULT_BITBUCKET_WORKSPACE
 
         if not username or not password:
-            QMessageBox.warning(
-                self,
-                "Bitbucket Configuration",
-                "Bitbucket username and app password are required."
-                "\nPlease update them in the Settings tab.",
-            )
-            self.tabs.setCurrentWidget(self.settings_tab)
-            self.settings_tab.focus_bitbucket_credentials()
+            if show_dialog:
+                QMessageBox.warning(
+                    self,
+                    "Bitbucket Configuration",
+                    "Bitbucket username and app password are required."
+                    "\nPlease update them in the Settings tab.",
+                )
+                self.tabs.setCurrentWidget(self.settings_tab)
+                self.settings_tab.focus_bitbucket_credentials()
             return None
 
         if not slug:
-            QMessageBox.warning(
-                self,
-                "Bitbucket Configuration",
-                "Repository slug is required."
-                "\nPlease fill it in under the Settings tab.",
-            )
-            self.tabs.setCurrentWidget(self.settings_tab)
-            self.settings_tab.focus_bitbucket_slug()
+            if show_dialog:
+                QMessageBox.warning(
+                    self,
+                    "Bitbucket Configuration",
+                    "Select an active Bitbucket repository in Settings before loading pull requests.",
+                )
+                self.tabs.setCurrentWidget(self.settings_tab)
             return None
 
         return {
@@ -517,23 +786,20 @@ class GitDiffExtractor(QWidget):
             'workspace': workspace,
         }
 
-    def _get_github_config(self):
-        owner = (self.config_manager.get_github_owner() or '').strip()
-        repo = (self.config_manager.get_github_repo() or '').strip()
+    def _get_github_config(self, repo=None, show_dialog=True):
+        active_repo = repo or self.config_manager.get_active_repository()
+        owner = (active_repo.get('owner') or '').strip()
+        repo = (active_repo.get('slug') or active_repo.get('name') or '').strip()
         token = (self.config_manager.get_github_token() or '').strip()
 
         if not owner or not repo:
-            QMessageBox.warning(
-                self,
-                "GitHub Configuration",
-                "GitHub owner and repository are required."
-                "\nPlease fill them in via the Settings tab.",
-            )
-            self.tabs.setCurrentWidget(self.settings_tab)
-            if not owner:
-                self.settings_tab.focus_github_owner()
-            else:
-                self.settings_tab.focus_github_repo()
+            if show_dialog:
+                QMessageBox.warning(
+                    self,
+                    "GitHub Configuration",
+                    "Select an active GitHub repository in Settings before loading pull requests.",
+                )
+                self.tabs.setCurrentWidget(self.settings_tab)
             return None
 
         headers = {'Accept': 'application/vnd.github+json'}
@@ -819,6 +1085,19 @@ class GitDiffExtractor(QWidget):
         for widget in widgets:
             widget.setEnabled(not loading)
 
+    def _on_pr_list_scrolled(self, value):
+        scrollbar = self.pr_list.verticalScrollBar()
+        if not scrollbar:
+            return
+        if self._pr_page_loading or not PRAggregationService.has_more(self._current_cursor_state):
+            return
+        if value >= max(0, scrollbar.maximum() - 40):
+            self.loadMorePRs(auto=True)
+
+    def _auto_load_more_if_needed(self):
+        # Keep pagination fully driven by explicit user scrolling events.
+        return
+
     def _generate_diff_async(self, repo_dir, output_dir, pr_data=None, commit_hashes=None):
         self._set_pr_loading(True, "Processing…")
 
@@ -929,19 +1208,167 @@ class GitDiffExtractor(QWidget):
 
     # ------------------------------------------------------------------
     # Configuration synchronisation
-    def on_repo_changed(self, repo_dir):
-        repo_dir = repo_dir.strip()
-        self.config_manager.set_repo_dir(repo_dir)
-        self.apply_repo_config()
+    def _initialize_active_repository(self):
+        selected_repos = self.config_manager.get_selected_repositories()
+        if selected_repos:
+            active_repo = self.config_manager.get_active_repository()
+            self._prepare_selected_repositories(
+                selected_repos,
+                show_success=False,
+                preferred_active_repo_id=(active_repo.get('id') or ''),
+            )
+            return
+
+        active_repo = self.config_manager.get_active_repository()
+        repo_id = (active_repo.get('id') or '').strip()
+        if not repo_id:
+            return
+
+        local_dir = (active_repo.get('local_dir') or '').strip()
+        if local_dir and os.path.isdir(local_dir):
+            self.config_manager.set_repo_dir(local_dir)
+            self.apply_repo_config()
+            return
+
+        self._prepare_selected_repositories([active_repo], show_success=False, preferred_active_repo_id=repo_id)
+
+    def _on_active_repositories_selected(self, repos):
+        self._prepare_selected_repositories(repos, show_success=True)
+
+    def _prepare_selected_repositories(self, repos, show_success, preferred_active_repo_id=''):
+        if self._repo_activation_in_progress:
+            return
+        selected = [dict(repo or {}) for repo in (repos or []) if (repo or {}).get('id')]
+        if not selected:
+            return
+
+        provider = (selected[0].get('provider') or self.config_manager.get_provider() or 'bitbucket').lower()
+        selected = [repo for repo in selected if (repo.get('provider') or provider).lower() == provider]
+        if not selected:
+            return
+
+        valid, message, _ = RepositoryProvider.validate_provider_config(provider, self.config_manager)
+        if not valid:
+            QMessageBox.warning(self, "Configuration Error", message)
+            self.tabs.setCurrentWidget(self.settings_tab)
+            self.settings_tab.set_repository_activation_finished(False)
+            return
+
+        self._repo_activation_in_progress = True
+        self._set_repo_activation_ui(
+            True,
+            f"Preparing {len(selected)} selected repositories...",
+        )
+
+        def on_result(prepared_repos):
+            prepared = list(prepared_repos or [])
+            if not prepared:
+                raise RuntimeError("No repositories were prepared.")
+
+            active_repo = prepared[0]
+            if preferred_active_repo_id:
+                for candidate in prepared:
+                    if str(candidate.get('id', '')) == str(preferred_active_repo_id):
+                        active_repo = candidate
+                        break
+
+            self.config_manager.set_selected_repositories(prepared)
+            self.config_manager.set_active_repository(active_repo)
+            self._pr_cache.clear()
+            self.apply_repo_config()
+            self._repo_activation_in_progress = False
+            self._set_repo_activation_ui(False)
+            self.settings_tab.set_repository_activation_finished(True, prepared, active_repo)
+            if show_success:
+                QMessageBox.information(
+                    self,
+                    "Repositories Updated",
+                    f"Prepared {len(prepared)} repositories.\n"
+                    f"Primary repository: {active_repo.get('owner', '')}/{active_repo.get('slug', active_repo.get('name', ''))}.",
+                )
+
+        def on_error(exc: Exception):
+            self._repo_activation_in_progress = False
+            self._set_repo_activation_ui(False)
+            self.settings_tab.set_repository_activation_finished(False)
+            QMessageBox.critical(self, "Repository Setup Error", f"Failed to prepare repository:\n{exc}")
+
+        if not self.task_runner:
+            try:
+                on_result(RepositoryProvider.ensure_local_checkouts(selected, self.config_manager))
+            except Exception as exc:  # noqa: BLE001
+                on_error(exc)
+            return
+
+        self.task_runner.run(
+            lambda: RepositoryProvider.ensure_local_checkouts(selected, self.config_manager),
+            description="Prepare Active Repository",
+            on_result=on_result,
+            on_error=on_error,
+        )
+
+    def _set_repo_activation_ui(self, active: bool, message: str = "Preparing repository..."):
+        if active:
+            self.tabs.setEnabled(False)
+            if self._repo_progress_dialog is None:
+                dialog = QProgressDialog(message, None, 0, 0, self)
+                dialog.setWindowTitle("Preparing Repository")
+                dialog.setWindowModality(Qt.ApplicationModal)
+                dialog.setCancelButton(None)
+                dialog.setMinimumDuration(0)
+                dialog.setAutoClose(False)
+                dialog.setAutoReset(False)
+                dialog.setWindowFlag(Qt.WindowCloseButtonHint, False)
+                self._repo_progress_dialog = dialog
+            else:
+                self._repo_progress_dialog.setLabelText(message)
+            self._repo_progress_dialog.show()
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            return
+
+        self.tabs.setEnabled(True)
+        if self._repo_progress_dialog is not None:
+            self._repo_progress_dialog.hide()
+
+        while QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+
+    def _require_active_repo_dir(self):
+        if self._repo_activation_in_progress:
+            QMessageBox.information(
+                self,
+                "Repository Setup In Progress",
+                "The selected repository is still being prepared. Please wait a moment and try again.",
+            )
+            return None
+
+        repo_dir = (self.config_manager.get_repo_dir() or '').strip()
+        if repo_dir and os.path.isdir(repo_dir):
+            return repo_dir
+
+        QMessageBox.warning(
+            self,
+            INPUT_ERROR,
+            "Active repository is not set.\nUse Settings -> Repository Discovery to choose a repository.",
+        )
+        self.tabs.setCurrentWidget(self.settings_tab)
+        return None
 
     def apply_repo_config(self):
         repo_dir = self.config_manager.get_repo_dir()
         output_dir = self.config_manager.get_output_dir()
         commits = self.config_manager.get_commit_hashes()
+        selected_count = len(self.config_manager.get_selected_repositories())
 
         self._set_line_edit_text(self.repo_input, repo_dir)
         self._set_line_edit_text(self.output_input, output_dir)
         self._set_line_edit_text(self.commit_input, commits)
+        if selected_count > 1:
+            self.repo_label.setText(f'Primary Repository Directory ({selected_count} selected):')
+        elif selected_count == 1:
+            self.repo_label.setText('Primary Repository Directory (1 selected):')
+        else:
+            self.repo_label.setText('Primary Repository Directory:')
 
         if hasattr(self, 'settings_tab') and self.settings_tab:
             self.settings_tab.apply_repo_config()
@@ -956,9 +1383,6 @@ class GitDiffExtractor(QWidget):
         block = line_edit.blockSignals(True)
         line_edit.setText(value)
         line_edit.blockSignals(block)
-
-    def _handle_repo_edit(self):
-        self.on_repo_changed(self.repo_input.text())
 
     def _store_commit_hashes(self):
         self.config_manager.set_commit_hashes(self.commit_input.text().strip())

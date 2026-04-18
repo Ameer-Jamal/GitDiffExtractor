@@ -7,7 +7,7 @@ import requests
 from PyQt5.QtCore    import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
-    QLineEdit, QPushButton, QLabel, QFileDialog, QMessageBox, QFrame
+    QLineEdit, QPushButton, QLabel, QMessageBox
 )
 from FilterableBranchSelector import FilterableBranchSelector
 
@@ -35,15 +35,15 @@ class CreatePRTab(QWidget):
         repo_form.setHorizontalSpacing(12)
         repo_form.setVerticalSpacing(8)
 
-        # Repository path + Browse button
+        # Active repository path (selected in Settings)
         self.repo_input = QLineEdit(self.config.get_repo_dir())
-        browse_btn     = QPushButton("Browse")
-        browse_btn.clicked.connect(self._browse_repo)
+        self.repo_input.setReadOnly(True)
+        self.repo_input.setPlaceholderText("Select active repository in Settings")
         path_layout    = QHBoxLayout()
         path_layout.addWidget(self.repo_input)
-        path_layout.addWidget(browse_btn)
         repo_form.addRow("Repository Path:", path_layout)
-        self.repo_input.editingFinished.connect(self._handle_repo_edited)
+        self.repo_context_label = QLabel(self)
+        repo_form.addRow("Selection Context:", self.repo_context_label)
 
         # Bitbucket credentials & slug
         self.bb_user = QLineEdit(self.config.get_bitbucket_username())
@@ -56,12 +56,14 @@ class CreatePRTab(QWidget):
         self.bb_pwd.editingFinished.connect(self._store_bitbucket_password)
 
         self.bb_workspace = QLineEdit(self.config.get_bitbucket_workspace())
+        self.bb_workspace.setReadOnly(True)
+        self.bb_workspace.setPlaceholderText("Set by active repository")
         repo_form.addRow("Workspace:", self.bb_workspace)
-        self.bb_workspace.editingFinished.connect(self._store_bitbucket_workspace)
 
         self.bb_slug = QLineEdit(self.config.get_repo_slug())
+        self.bb_slug.setReadOnly(True)
+        self.bb_slug.setPlaceholderText("Set by active repository")
         repo_form.addRow("Repo Slug:", self.bb_slug)
-        self.bb_slug.editingFinished.connect(self._store_repo_slug)
 
         repo_group.setLayout(repo_form)
         main.addWidget(repo_group)
@@ -121,27 +123,11 @@ class CreatePRTab(QWidget):
         main.addLayout(btn_layout)
 
 
-    def _browse_repo(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Repository")
-        if directory:
-            self.repo_input.setText(directory)
-            self.repoChanged.emit(directory)
-
-    def _handle_repo_edited(self):
-        repo_dir = self.repo_input.text().strip()
-        self.repoChanged.emit(repo_dir)
-
     def _store_bitbucket_user(self):
         self.config.set_bitbucket_username(self.bb_user.text().strip())
 
     def _store_bitbucket_password(self):
         self.config.set_bitbucket_app_password(self.bb_pwd.text().strip())
-
-    def _store_bitbucket_workspace(self):
-        self.config.set_bitbucket_workspace(self.bb_workspace.text().strip())
-
-    def _store_repo_slug(self):
-        self.config.set_repo_slug(self.bb_slug.text().strip())
 
     def _store_pr_title(self):
         self.config.set_pr_title(self.pr_title.text().strip())
@@ -154,10 +140,17 @@ class CreatePRTab(QWidget):
 
 
     def refresh_branches(self, auto=False):
+        if not self._ensure_single_repo_context("refresh branches", show_dialog=not auto):
+            return
+
         repo = self.repo_input.text().strip()
         if not repo:
             if not auto:
-                QMessageBox.warning(self, "Input Error", "Please select a repository directory.")
+                QMessageBox.warning(
+                    self,
+                    "Input Error",
+                    "Active repository is not set. Select one in Settings first.",
+                )
             return
 
         def sync_branch_lists(output):
@@ -228,6 +221,9 @@ class CreatePRTab(QWidget):
 
 
     def create_pr(self):
+        if not self._ensure_single_repo_context("create a pull request"):
+            return
+
         u    = self.bb_user.text().strip()
         p    = self.bb_pwd.text().strip()
         workspace = self.bb_workspace.text().strip()
@@ -283,13 +279,25 @@ class CreatePRTab(QWidget):
 
     def apply_repo_config(self):
         repo_dir = self.config.get_repo_dir()
+        selected_count = len(self.config.get_selected_repositories())
         self.set_repo(repo_dir)
 
         self.bb_user.setText(self.config.get_bitbucket_username())
         self.bb_pwd.setText(self.config.get_bitbucket_app_password())
-        self.bb_workspace.setText(self.config.get_bitbucket_workspace())
-        self.bb_slug.setText(self.config.get_repo_slug())
+        active_repo = self.config.get_active_repository()
+        self.bb_workspace.setText(active_repo.get("owner") or self.config.get_bitbucket_workspace())
+        self.bb_slug.setText(active_repo.get("slug") or "")
         self.pr_title.setText(self.config.get_pr_title())
+
+        if selected_count > 1:
+            self.repo_context_label.setText(
+                f"Multiple repositories selected ({selected_count}). "
+                "Create PR works only with one repository."
+            )
+        elif selected_count == 1:
+            self.repo_context_label.setText("Single repository selected. PR creation enabled.")
+        else:
+            self.repo_context_label.setText("No repository selected.")
 
         src_branch = self.config.get_source_branch()
         dst_branch = self.config.get_target_branch()
@@ -303,8 +311,31 @@ class CreatePRTab(QWidget):
         else:
             self.dst_selector.set_current_text("")
 
-        if repo_dir:
+        if repo_dir and selected_count == 1:
             self.refresh_branches(auto=True)
+
+    def _ensure_single_repo_context(self, action_name, show_dialog=True):
+        selected_count = len(self.config.get_selected_repositories())
+        if selected_count == 1:
+            return True
+
+        if not show_dialog:
+            return False
+
+        if selected_count == 0:
+            QMessageBox.warning(
+                self,
+                "Selection Required",
+                "No repository selected.\nSelect one repository in Settings first.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Single Repository Required",
+                f"You have {selected_count} repositories selected.\n"
+                f"To {action_name}, select exactly one repository in Settings.",
+            )
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers

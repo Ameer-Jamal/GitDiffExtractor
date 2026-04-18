@@ -10,7 +10,7 @@
     "source_branch": "",
     "target_branch": "",
     "provider": "bitbucket",
-    "bitbucket_workspace": "",
+    "bitbucket_workspace": "etqdev",
     "github_owner": "",
     "github_repo": "",
     "github_token": ""

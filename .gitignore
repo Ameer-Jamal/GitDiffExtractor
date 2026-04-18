@@ -1,3 +1,4 @@
 .idea
 __pycache__
 .venv
+.git_diff_extractor.json
