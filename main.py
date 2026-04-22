@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEd
                              QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup, QProgressDialog)
 from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
+from ContributionHistoryTab import ContributionHistoryTab
 from CreatePrTab import CreatePRTab
 from ListDelegates import PRListDelegate, UI_ROLE
 from PRAggregationService import PRAggregationService
@@ -69,14 +70,16 @@ class GitDiffExtractor(QWidget):
         self.branch_viewer = BranchCommitViewer(self.config_manager, self.task_runner)
         self.create_pr_tab = CreatePRTab(self.config_manager, self.task_runner)
         self.settings_tab = SettingsTab(self.config_manager, self.task_runner)
+        self.contribution_history_tab = ContributionHistoryTab(self.config_manager, self.task_runner)
         self.settings_tab.providerChanged.connect(self._on_provider_updated)
         self.settings_tab.settingsUpdated.connect(self._on_settings_updated)
         self.settings_tab.activeRepositoriesChanged.connect(self._on_active_repositories_selected)
 
         # Add both tabs to the QTabWidget
-        self.tabs.addTab(self.pr_tab_widget, "PR Diff Extractor")  # Default tab
+        self.tabs.addTab(self.pr_tab_widget, "Diff Extractor")  # Default tab
         self.tabs.addTab(self.branch_viewer, "Branch Commit Viewer")
         self.tabs.addTab(self.create_pr_tab, "Create PR")
+        self.tabs.addTab(self.contribution_history_tab, "Contribution History")
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Set the layout for the main window
@@ -475,7 +478,6 @@ class GitDiffExtractor(QWidget):
         self._current_cursor_state = dict(next_cursor or {})
         self.load_more_button.setEnabled(PRAggregationService.has_more(self._current_cursor_state))
 
-        active_repo = self.config_manager.get_active_repository()
         repo_ids = [str((repo or {}).get('id', '')) for repo in getattr(self, '_current_selected_repos', []) if (repo or {}).get('id')]
         cache_key = (self._current_provider, tuple(sorted(repo_ids)), self._current_filter_mode)
         self._pr_cache[cache_key] = (
@@ -728,6 +730,7 @@ class GitDiffExtractor(QWidget):
     def _on_settings_updated(self):
         self._pr_cache.clear()
         self.apply_repo_config()
+        self.contribution_history_tab.apply_provider_context()
 
     def _on_provider_updated(self, provider):
         provider = (provider or 'bitbucket').lower()
@@ -740,6 +743,7 @@ class GitDiffExtractor(QWidget):
         self.prs = []
         self.pr_list.clear()
         self.apply_repo_config()
+        self.contribution_history_tab.apply_provider_context()
 
     def _selected_filter(self):
         if self.only_pr_radio.isChecked():
@@ -1275,6 +1279,7 @@ class GitDiffExtractor(QWidget):
             self.config_manager.set_selected_repositories(prepared)
             self.config_manager.set_active_repository(active_repo)
             self._pr_cache.clear()
+            self.contribution_history_tab.apply_provider_context()
             self.apply_repo_config()
             self._repo_activation_in_progress = False
             self._set_repo_activation_ui(False)
