@@ -44,6 +44,7 @@ class ConfigManager:
         "active_repo_local_dir": "",
         "selected_repositories_json": "[]",
         "repo_discovery_cache_json": "{}",
+        "contribution_history_state_json": "{}",
     }
     LEGACY_REPO_PROVIDER_KEYS = (
         "provider",
@@ -389,6 +390,18 @@ class ConfigManager:
             "repositories": repositories if isinstance(repositories, list) else [],
         }
         self._set_discovery_cache(cache)
+
+    def get_contribution_history_state(self) -> dict:
+        raw = self._get_global("contribution_history_state_json")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def set_contribution_history_state(self, state: dict) -> None:
+        payload = state if isinstance(state, dict) else {}
+        self._set_global("contribution_history_state_json", json.dumps(payload))
 
     def get_managed_repo_root(self) -> str:
         stored = self.settings.value("managed_repo_root", "", str)

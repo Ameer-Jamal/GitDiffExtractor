@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 import requests
 
 from PyQt5.QtCore    import Qt, pyqtSignal
@@ -19,6 +20,8 @@ class CreatePRTab(QWidget):
         super().__init__()
         self.config = config_manager
         self.task_runner = task_runner
+        self._last_auto_refresh_repo = ""
+        self._last_auto_refresh_ts = 0.0
         self._build_ui()
 
     def _build_ui(self):
@@ -167,19 +170,7 @@ class CreatePRTab(QWidget):
 
         if not self.task_runner:
             try:
-                subprocess.run(
-                    ['git', 'fetch', 'origin'],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    cwd=repo,
-                )
-                output = subprocess.run(
-                    ['git', 'branch', '-r'],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    cwd=repo,
-                ).stdout
+                output = self._fetch_remote_branches_output(repo)
                 sync_branch_lists(output)
             except Exception as e:  # noqa: BLE001
                 if not auto:
@@ -189,23 +180,22 @@ class CreatePRTab(QWidget):
         self._set_refresh_state(True)
 
         def task():
-            subprocess.run(
-                ['git', 'fetch', 'origin'],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                cwd=repo,
-            )
-            result = subprocess.run(
-                ['git', 'branch', '-r'],
-                capture_output=True,
-                text=True,
-                check=True,
-                cwd=repo,
-            )
-            return result.stdout
+            try:
+                output = self._fetch_remote_branches_output(repo)
+                return {"ok": True, "output": output}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc)}
 
-        def on_success(output):
-            sync_branch_lists(output)
+        def on_success(result):
+            if not isinstance(result, dict):
+                if not auto:
+                    QMessageBox.critical(self, "Error", "Failed to load branches.")
+                return
+            if result.get("ok"):
+                sync_branch_lists(result.get("output", ""))
+                return
+            if not auto:
+                QMessageBox.critical(self, "Error", f"Failed to load branches:\n{result.get('error', '')}")
 
         def on_error(exc: Exception):
             if not auto:
@@ -312,7 +302,14 @@ class CreatePRTab(QWidget):
             self.dst_selector.set_current_text("")
 
         if repo_dir and selected_count == 1:
-            self.refresh_branches(auto=True)
+            now = time.time()
+            if (
+                repo_dir != self._last_auto_refresh_repo
+                or (now - self._last_auto_refresh_ts) > 120
+            ):
+                self._last_auto_refresh_repo = repo_dir
+                self._last_auto_refresh_ts = now
+                self.refresh_branches(auto=True)
 
     def _ensure_single_repo_context(self, action_name, show_dialog=True):
         selected_count = len(self.config.get_selected_repositories())
@@ -365,3 +362,43 @@ class CreatePRTab(QWidget):
             QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Error", f"Failed to create PR:\n{exc}")
+
+    def _fetch_remote_branches_output(self, repo):
+        """
+        Fetch remotes with progressively stronger recovery strategies.
+        Handles occasional ref-state corruption without crashing background startup refresh.
+        """
+        strategies = [
+            [["git", "fetch", "origin"]],
+            [["git", "fetch", "--prune", "origin"]],
+            [["git", "remote", "prune", "origin"], ["git", "fetch", "--prune", "origin"]],
+            [["git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]],
+        ]
+        last_error = ""
+
+        for commands in strategies:
+            try:
+                for command in commands:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        cwd=repo,
+                        capture_output=True,
+                        text=True,
+                    )
+                result = subprocess.run(
+                    ['git', 'branch', '-r'],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    cwd=repo,
+                )
+                return result.stdout
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip()
+                stdout = (exc.stdout or "").strip()
+                details = stderr or stdout or str(exc)
+                last_error = details
+                continue
+
+        raise RuntimeError(last_error or "git fetch failed")

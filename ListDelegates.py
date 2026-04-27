@@ -1,5 +1,5 @@
 from PyQt5.QtCore import Qt, QRect, QSize
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import QStyledItemDelegate, QStyle
 
 
@@ -7,6 +7,13 @@ UI_ROLE = Qt.UserRole + 2
 
 
 class PRListDelegate(QStyledItemDelegate):
+    @staticmethod
+    def _text_height(metrics, width, text, min_height=18):
+        if width <= 0:
+            return min_height
+        rect = metrics.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, text or "")
+        return max(min_height, rect.height())
+
     def paint(self, painter: QPainter, option, index):
         data = index.data(UI_ROLE) or {}
         header = data.get("header", "")
@@ -45,8 +52,9 @@ class PRListDelegate(QStyledItemDelegate):
         header_font.setPointSize(max(10, option.font.pointSize() + 1))
         painter.setFont(header_font)
         painter.setPen(text)
-        painter.drawText(QRect(x, y, width, 20), Qt.AlignLeft | Qt.AlignVCenter, header)
-        y += 24
+        header_h = self._text_height(painter.fontMetrics(), width, header, min_height=20)
+        painter.drawText(QRect(x, y, width, header_h), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, header)
+        y += header_h + 4
 
         chip_text = repo_label or "unknown/repo"
         chip_font = QFont(option.font)
@@ -64,20 +72,50 @@ class PRListDelegate(QStyledItemDelegate):
         body_font = QFont(option.font)
         painter.setFont(body_font)
         painter.setPen(muted)
-        painter.drawText(QRect(x, y, width, 18), Qt.AlignLeft | Qt.AlignVCenter, branch_line)
-        y += 20
+        branch_h = self._text_height(painter.fontMetrics(), width, branch_line, min_height=18)
+        painter.drawText(QRect(x, y, width, branch_h), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, branch_line)
+        y += branch_h + 2
 
         painter.setPen(text)
-        painter.drawText(QRect(x, y, width, 18), Qt.AlignLeft | Qt.AlignVCenter, f"Title: {title}")
-        y += 20
+        title_text = f"Title: {title}"
+        title_h = self._text_height(painter.fontMetrics(), width, title_text, min_height=18)
+        painter.drawText(QRect(x, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, title_text)
+        y += title_h + 2
 
         painter.setPen(muted)
-        painter.drawText(QRect(x, y, width, 18), Qt.AlignLeft | Qt.AlignVCenter, f"Author: {author}")
+        author_text = f"Author: {author}"
+        author_h = self._text_height(painter.fontMetrics(), width, author_text, min_height=18)
+        painter.drawText(QRect(x, y, width, author_h), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, author_text)
 
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QSize(option.rect.width(), 106)
+        data = index.data(UI_ROLE) or {}
+        header = data.get("header", "")
+        branch_line = data.get("branch_line", "")
+        title = f"Title: {data.get('title', '')}"
+        author = f"Author: {data.get('author', '')}"
+
+        widget = option.widget
+        available_width = option.rect.width()
+        if widget is not None and hasattr(widget, "viewport"):
+            available_width = max(280, widget.viewport().width() - 32)
+        else:
+            available_width = max(280, available_width - 32)
+
+        header_font = QFont(option.font)
+        header_font.setBold(True)
+        header_font.setPointSize(max(10, option.font.pointSize() + 1))
+        header_metrics = QFontMetrics(header_font)
+        body_metrics = option.fontMetrics
+
+        header_h = self._text_height(header_metrics, available_width, header, min_height=20)
+        branch_h = self._text_height(body_metrics, available_width, branch_line, min_height=18)
+        title_h = self._text_height(body_metrics, available_width, title, min_height=18)
+        author_h = self._text_height(body_metrics, available_width, author, min_height=18)
+
+        total_h = 8 + header_h + 4 + 22 + branch_h + 2 + title_h + 2 + author_h + 8
+        return QSize(option.rect.width(), total_h)
 
 
 class BranchListDelegate(QStyledItemDelegate):

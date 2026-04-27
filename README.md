@@ -27,24 +27,49 @@ The core inspiration behind this tool is **bridging the gap between developers a
 
 5. **Smart Hash Extraction**: Uses robust regex-based matching to ensure that **Git commit hashes** are extracted correctly, ensuring reliability even when working with large repositories.
 
+6. **Provider-Based Repository Discovery**: Configure Bitbucket or GitHub credentials in **Settings**, discover accessible repositories, and activate one or many repositories without manual local-folder selection.
+
+7. **Multi-Repository Workflows**: Run PR and branch workflows across selected repositories with clear repository context in results.
+
+8. **Contribution History Tab**:
+   - Query merged PRs, commits, or merged PRs + standalone commits
+   - Scope by current repo, selected repos, or all repos in provider context
+   - Filter by developer identity, date range presets/custom range, text search, branch, and bot exclusion
+   - Select multiple developer aliases in one query (OR matching)
+   - View summary metrics including `Fully scanned: X/Y`
+   - Export to CSV, JSON, and Markdown (including PR descriptions)
+
 ---
 
 ## **How to Use the App**
 
-1. **Clone Your Repository**:
-   - Start by pointing the app to the Git repository you're working with by selecting your repository folder.
+1. **Configure Provider in Settings**:
+   - Choose **Bitbucket** or **GitHub** and enter credentials.
+   - Discover repositories and select one or many active repositories.
 
 2. **View and Filter PRs**:
-   - Use the **List Pull Requests** button to display all PRs associated with the repository. PRs are displayed with a clickable commit hash for easy navigation.
+   - Use the **PR Diff Extractor** tab to list PRs for the active repository scope.
+   - Search and open diffs as needed.
 
-3. **Search PRs**:
-   - Use the search bar to quickly filter through PRs using keywords related to commit messages or files changed.
+3. **Use Branch Commit Viewer / Create PR**:
+   - Branch and PR actions run against active provider-backed repositories.
 
-4. **Diff Analysis**:
-   - Click on any PR in the list to automatically retrieve and display the Git diff for that commit. This diff can then be fed into AI tools for further analysis and understanding.
+4. **Use Contribution History**:
+   - Open the **Contribution History** tab.
+   - Select one or multiple developer identities (aliases), choose scope/date/type, and run query.
+   - Export results for resume/self-review/reporting.
 
 5. **Use AI to Understand Diffs**:
    - Once you have the diff displayed, you can copy it and interact with AI tools like ChatGPT to get insights on the changes, ask questions, or receive suggestions.
+
+---
+
+## **Contribution History Notes**
+
+- **Summary-first output**: No inline code diffs by default; focus is historical work reconstruction.
+- **Titles/messages only mode**: Keeps output compact for reporting and AI prompting.
+- **Rate-limit resilience**: Bitbucket scans use throttling, retry/backoff, and continuation logic to improve completeness.
+- **Scan completeness signal**: Summary shows `Fully scanned: X/Y` so you can quickly see whether a run was partial.
 
 ---
 
