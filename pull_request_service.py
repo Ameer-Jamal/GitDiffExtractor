@@ -1,0 +1,354 @@
+from __future__ import annotations
+
+import re
+from typing import Optional
+
+import requests
+
+from PRAggregationService import PRAggregationService
+
+
+_TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b", re.IGNORECASE)
+
+
+class PullRequestService:
+    def __init__(self, config):
+        self.config = config
+
+    def aggregate_pull_requests(
+        self,
+        selected_repos: list[dict],
+        filter_mode: str,
+        cursor_state: dict[str, str],
+        reset: bool,
+    ) -> tuple[list[dict], dict[str, str]]:
+        provider = (self.config.get_provider() or "bitbucket").lower()
+        aggregated_records: list[dict] = []
+        next_tokens: dict[str, str] = {}
+        repo_fetch_pairs = PRAggregationService.repos_for_page(selected_repos, cursor_state, reset)
+
+        for repo, repo_next in repo_fetch_pairs:
+            repo_records, repo_next_token = self.list_pull_requests_for_repo(
+                repo,
+                filter_mode=filter_mode,
+                next_cursor=repo_next or None,
+            )
+            aggregated_records.extend(repo_records)
+            next_tokens[str((repo or {}).get("id", ""))] = repo_next_token or ""
+
+        aggregated_records.sort(key=lambda pr: pr.get("updated_on") or "", reverse=True)
+        normalized_state = PRAggregationService.normalize_next_state(selected_repos, next_tokens)
+        return aggregated_records, normalized_state
+
+    def list_pull_requests_for_repo(
+        self,
+        repo: dict,
+        *,
+        filter_mode: str = "open",
+        next_cursor: Optional[str] = None,
+        search_text: str = "",
+    ) -> tuple[list[dict], Optional[str]]:
+        provider = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
+        if search_text:
+            return self.search_pull_requests([repo], filter_mode, search_text), None
+        if provider == "github":
+            config = self._get_github_config(repo)
+            records, cursor = self._fetch_github_pull_requests_page(filter_mode, config, next_cursor=next_cursor)
+        else:
+            config = self._get_bitbucket_config(repo)
+            records, cursor = self._fetch_bitbucket_pull_requests_page(filter_mode, config, next_cursor=next_cursor)
+        return [self._attach_repo_context(pr, repo) for pr in records], cursor
+
+    def search_pull_requests(self, selected_repos: list[dict], filter_mode: str, query: str) -> list[dict]:
+        provider = (self.config.get_provider() or "bitbucket").lower()
+        results: list[dict] = []
+        if provider == "bitbucket":
+            username = (self.config.get_bitbucket_username() or "").strip()
+            password = (self.config.get_bitbucket_app_password() or "").strip()
+            if not username or not password:
+                return results
+
+            state_clause = ""
+            if filter_mode == "open":
+                state_clause = ' AND state = "OPEN"'
+            elif filter_mode == "merged":
+                state_clause = ' AND state = "MERGED"'
+
+            escaped_query = query.replace('"', '\\"')
+            expression = (
+                f'(title ~ "{escaped_query}" OR source.branch.name ~ "{escaped_query}" '
+                f'OR destination.branch.name ~ "{escaped_query}"){state_clause}'
+            )
+
+            for repo in selected_repos:
+                workspace = (repo.get("owner") or "").strip()
+                slug = (repo.get("slug") or "").strip()
+                if not workspace or not slug:
+                    continue
+                response = requests.get(
+                    f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests",
+                    params={"pagelen": 30, "q": expression},
+                    auth=(username, password),
+                    timeout=15,
+                )
+                response.raise_for_status()
+                for pr in response.json().get("values", []):
+                    results.append(self._attach_repo_context(self._map_bitbucket_pr(pr), repo))
+            return results
+
+        token = (self.config.get_github_token() or "").strip()
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = f"token {token}"
+
+        state_term = ""
+        if filter_mode == "open":
+            state_term = "state:open"
+        elif filter_mode == "merged":
+            state_term = "state:closed"
+
+        for repo in selected_repos:
+            owner = (repo.get("owner") or "").strip()
+            slug = (repo.get("slug") or repo.get("name") or "").strip()
+            if not owner or not slug:
+                continue
+            search_query = f"repo:{owner}/{slug} is:pr {state_term} {query}".strip()
+            response = requests.get(
+                "https://api.github.com/search/issues",
+                params={"q": search_query, "per_page": 30},
+                headers=headers,
+                timeout=15,
+            )
+            response.raise_for_status()
+            for issue in response.json().get("items", []):
+                pr_url = (issue.get("pull_request") or {}).get("url")
+                if not pr_url:
+                    continue
+                pr_response = requests.get(pr_url, headers=headers, timeout=15)
+                pr_response.raise_for_status()
+                results.append(self._attach_repo_context(self._map_github_pr(pr_response.json()), repo))
+
+        return results
+
+    def find_pull_requests_by_ticket(
+        self,
+        selected_repos: list[dict],
+        ticket: str,
+        *,
+        filter_mode: str = "all",
+    ) -> list[dict]:
+        ticket_id = self.extract_ticket_id(ticket)
+        if not ticket_id:
+            raise ValueError("A ticket id like RU-25463 is required.")
+
+        results = self.search_pull_requests(selected_repos, filter_mode, ticket_id)
+        exact_matches = [
+            pr
+            for pr in results
+            if self._pull_request_matches_ticket(pr, ticket_id)
+        ]
+        exact_matches.sort(
+            key=lambda pr: (
+                pr.get("updated_on") or "",
+                str(pr.get("repo_label") or ""),
+                str(pr.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        return exact_matches
+
+    def get_pull_request(self, repo: dict, pr_id: str | int) -> dict:
+        provider = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
+        if provider == "github":
+            config = self._get_github_config(repo)
+            response = requests.get(
+                f"https://api.github.com/repos/{config['owner']}/{config['repo']}/pulls/{pr_id}",
+                headers=config["headers"],
+                timeout=15,
+            )
+            response.raise_for_status()
+            return self._attach_repo_context(self._map_github_pr(response.json()), repo)
+
+        config = self._get_bitbucket_config(repo)
+        response = requests.get(
+            f"https://api.bitbucket.org/2.0/repositories/{config['workspace']}/{config['slug']}/pullrequests/{pr_id}",
+            auth=(config["username"], config["password"]),
+            timeout=15,
+        )
+        response.raise_for_status()
+        return self._attach_repo_context(self._map_bitbucket_pr(response.json()), repo)
+
+    def _get_bitbucket_config(self, repo: dict) -> dict:
+        username = (self.config.get_bitbucket_username() or "").strip()
+        password = (self.config.get_bitbucket_app_password() or "").strip()
+        workspace = (repo.get("owner") or self.config.get_bitbucket_workspace() or "").strip()
+        slug = (repo.get("slug") or "").strip()
+        if not username or not password:
+            raise ValueError("Bitbucket username and app password are required.")
+        if not workspace or not slug:
+            raise ValueError("Bitbucket workspace and repository slug are required.")
+        return {
+            "username": username,
+            "password": password,
+            "workspace": workspace,
+            "slug": slug,
+        }
+
+    def _get_github_config(self, repo: dict) -> dict:
+        owner = (repo.get("owner") or self.config.get_github_owner() or "").strip()
+        repo_name = (repo.get("slug") or repo.get("name") or "").strip()
+        if not owner or not repo_name:
+            raise ValueError("GitHub owner and repository are required.")
+        headers = {"Accept": "application/vnd.github+json"}
+        token = (self.config.get_github_token() or "").strip()
+        if token:
+            headers["Authorization"] = f"token {token}"
+        return {
+            "owner": owner,
+            "repo": repo_name,
+            "headers": headers,
+        }
+
+    def _fetch_bitbucket_pull_requests_page(
+        self,
+        filter_mode: str,
+        config: dict,
+        next_cursor: Optional[str] = None,
+    ) -> tuple[list[dict], Optional[str]]:
+        if next_cursor:
+            request_url = next_cursor
+            request_params = None
+        else:
+            states = ["OPEN"] if filter_mode == "open" else ["MERGED"] if filter_mode == "merged" else ["OPEN", "MERGED"]
+            request_url = f"https://api.bitbucket.org/2.0/repositories/{config['workspace']}/{config['slug']}/pullrequests"
+            request_params = [("pagelen", "50")]
+            request_params.extend(("state", state) for state in states)
+
+        response = requests.get(
+            request_url,
+            params=request_params,
+            auth=(config["username"], config["password"]),
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return [self._map_bitbucket_pr(pr) for pr in data.get("values", [])], data.get("next")
+
+    def _fetch_github_pull_requests_page(
+        self,
+        filter_mode: str,
+        config: dict,
+        next_cursor: Optional[str] = None,
+    ) -> tuple[list[dict], Optional[str]]:
+        if next_cursor:
+            request_url = next_cursor
+            request_params = None
+        else:
+            state_param = "open" if filter_mode == "open" else "closed" if filter_mode == "merged" else "all"
+            request_url = f"https://api.github.com/repos/{config['owner']}/{config['repo']}/pulls"
+            request_params = {"per_page": 50, "state": state_param}
+
+        response = requests.get(
+            request_url,
+            params=request_params,
+            headers=config["headers"],
+            timeout=15,
+        )
+        response.raise_for_status()
+        records: list[dict] = []
+        for pr_record in response.json():
+            is_merged = bool(pr_record.get("merged_at"))
+            state = pr_record.get("state", "open")
+            if filter_mode == "merged" and not is_merged:
+                continue
+            if filter_mode == "open" and state != "open":
+                continue
+            records.append(self._map_github_pr(pr_record))
+        return records, self._github_next_link(response.headers.get("Link"))
+
+    @staticmethod
+    def _attach_repo_context(pr: dict, repo: dict) -> dict:
+        repo_copy = dict(pr)
+        owner = (repo.get("owner") or "").strip()
+        slug = (repo.get("slug") or repo.get("name") or "").strip()
+        repo_copy["repo_id"] = str(repo.get("id", ""))
+        repo_copy["repo_label"] = f"{owner}/{slug}".strip("/")
+        repo_copy["repo_local_dir"] = (repo.get("local_dir") or "").strip()
+        return repo_copy
+
+    @staticmethod
+    def extract_ticket_id(value: str) -> str:
+        match = _TICKET_PATTERN.search(value or "")
+        return match.group(0).upper() if match else ""
+
+    @staticmethod
+    def _pull_request_matches_ticket(pr: dict, ticket_id: str) -> bool:
+        haystack = " ".join(
+            str(pr.get(field) or "")
+            for field in (
+                "title",
+                "source_branch",
+                "destination_branch",
+                "description",
+                "link",
+            )
+        )
+        return ticket_id.upper() in haystack.upper()
+
+    @staticmethod
+    def _map_bitbucket_pr(pr_record: dict) -> dict:
+        source = pr_record.get("source") or {}
+        destination = pr_record.get("destination") or {}
+        links = pr_record.get("links") or {}
+        merge_commit = pr_record.get("merge_commit") or {}
+        summary = pr_record.get("summary") or {}
+        return {
+            "id": pr_record.get("id"),
+            "title": pr_record.get("title"),
+            "state": (pr_record.get("state") or "").upper(),
+            "author": ((pr_record.get("author") or {}).get("display_name")),
+            "source_branch": (source.get("branch") or {}).get("name"),
+            "destination_branch": (destination.get("branch") or {}).get("name"),
+            "source_commit": (source.get("commit") or {}).get("hash"),
+            "destination_commit": (destination.get("commit") or {}).get("hash"),
+            "merge_commit": merge_commit.get("hash"),
+            "link": (links.get("html") or {}).get("href"),
+            "description": summary.get("raw") or pr_record.get("description"),
+            "updated_on": pr_record.get("updated_on"),
+            "provider": "bitbucket",
+        }
+
+    @staticmethod
+    def _map_github_pr(pr_record: dict) -> dict:
+        head = pr_record.get("head") or {}
+        base = pr_record.get("base") or {}
+        user = pr_record.get("user") or {}
+        merged = bool(pr_record.get("merged_at"))
+        state = "MERGED" if merged else (pr_record.get("state") or "open").upper()
+        return {
+            "id": pr_record.get("number"),
+            "title": pr_record.get("title"),
+            "state": state,
+            "author": user.get("login"),
+            "source_branch": head.get("ref"),
+            "destination_branch": base.get("ref"),
+            "source_commit": head.get("sha"),
+            "destination_commit": base.get("sha"),
+            "merge_commit": pr_record.get("merge_commit_sha"),
+            "link": pr_record.get("html_url"),
+            "description": pr_record.get("body"),
+            "updated_on": pr_record.get("updated_at"),
+            "provider": "github",
+        }
+
+    @staticmethod
+    def _github_next_link(link_header: Optional[str]) -> Optional[str]:
+        if not link_header:
+            return None
+        for part in link_header.split(","):
+            section = part.strip().split(";")
+            if len(section) < 2:
+                continue
+            if section[1].strip() == 'rel="next"':
+                return section[0].strip().strip("<>")
+        return None

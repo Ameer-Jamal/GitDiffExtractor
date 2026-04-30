@@ -216,7 +216,7 @@ class RepositoryProvider:
             clone_target = adapter.authenticated_clone_url(clone_url, config)
             cls._run_git(["git", "clone", clone_target, local_dir])
         else:
-            cls._run_git(["git", "fetch", "--all", "--prune"], cwd=local_dir)
+            cls._update_existing_checkout(local_dir)
 
         return local_dir
 
@@ -228,6 +228,63 @@ class RepositoryProvider:
             repo_copy["local_dir"] = cls.ensure_local_checkout(repo_copy, config)
             prepared.append(repo_copy)
         return prepared
+
+    @classmethod
+    def _update_existing_checkout(cls, local_dir: str) -> None:
+        try:
+            cls._run_git(["git", "fetch", "--all", "--prune"], cwd=local_dir)
+            return
+        except RepositoryProviderError as exc:
+            if not cls._is_stale_remote_ref_error(str(exc)):
+                raise
+            first_error = exc
+
+        recovery_steps = (
+            lambda: cls._remove_stale_remote_tracking_refs(local_dir, "origin"),
+            ["git", "remote", "prune", "origin"],
+            ["git", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+        )
+        for step in recovery_steps:
+            try:
+                if callable(step):
+                    step()
+                else:
+                    cls._run_git(step, cwd=local_dir)
+            except RepositoryProviderError as exc:
+                raise RepositoryProviderError(
+                    f"{first_error}\n\nAutomatic stale remote-ref recovery failed: {exc}"
+                ) from exc
+
+    @classmethod
+    def _remove_stale_remote_tracking_refs(cls, local_dir: str, remote: str) -> None:
+        remote_output = cls._run_git_output(["git", "ls-remote", "--heads", remote], cwd=local_dir)
+        remote_refs = {
+            line.split("\t", 1)[1].replace("refs/heads/", f"refs/remotes/{remote}/", 1)
+            for line in remote_output.splitlines()
+            if "\trefs/heads/" in line
+        }
+
+        local_output = cls._run_git_output(
+            ["git", "for-each-ref", f"refs/remotes/{remote}", "--format=%(refname)"],
+            cwd=local_dir,
+        )
+        stale_refs = [
+            ref.strip()
+            for ref in local_output.splitlines()
+            if ref.strip() and ref.strip() not in remote_refs and not ref.strip().endswith("/HEAD")
+        ]
+
+        for ref in stale_refs:
+            cls._run_git(["git", "update-ref", "-d", ref], cwd=local_dir)
+
+    @staticmethod
+    def _is_stale_remote_ref_error(message: str) -> bool:
+        text = (message or "").lower()
+        return (
+            "incorrect old value" in text
+            or "cannot lock ref" in text
+            or "is at" in text and "but expected" in text
+        )
 
     @staticmethod
     def _parse_next_link(link_header: Optional[str]) -> Optional[str]:
@@ -297,3 +354,14 @@ class RepositoryProvider:
             stdout = (exc.stdout or "").strip()
             details = stderr or stdout or str(exc)
             raise RepositoryProviderError(f"Git command failed: {details}") from exc
+
+    @staticmethod
+    def _run_git_output(command: List[str], cwd: Optional[str] = None) -> str:
+        try:
+            result = subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or str(exc)
+            raise RepositoryProviderError(f"Git command failed: {details}") from exc
+        return result.stdout

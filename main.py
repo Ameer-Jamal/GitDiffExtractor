@@ -14,8 +14,10 @@ from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
 from ContributionHistoryTab import ContributionHistoryTab
 from CreatePrTab import CreatePRTab
+from diff_service import DiffService
 from ListDelegates import PRListDelegate, UI_ROLE
 from PRAggregationService import PRAggregationService
+from pull_request_service import PullRequestService
 from RepositoryProvider import RepositoryProvider
 from SettingsTab import SettingsTab
 from TaskRunner import TaskRunner
@@ -58,7 +60,11 @@ class GitDiffExtractor(QWidget):
         self._current_cursor_state = {}
         self._repo_activation_in_progress = False
         self._repo_progress_dialog = None
+        self._previous_tab_index = 0
+        self._handling_tab_change = False
         self.task_runner = TaskRunner(self)
+        self.pr_service = PullRequestService(self.config_manager)
+        self.diff_service = DiffService()
         # Initialize the QTabWidget
         self.tabs = QTabWidget()
 
@@ -81,6 +87,8 @@ class GitDiffExtractor(QWidget):
         self.tabs.addTab(self.create_pr_tab, "Create PR")
         self.tabs.addTab(self.contribution_history_tab, "Contribution History")
         self.tabs.addTab(self.settings_tab, "Settings")
+        self._previous_tab_index = self.tabs.currentIndex()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Set the layout for the main window
         main_layout = QVBoxLayout()
@@ -118,19 +126,6 @@ class GitDiffExtractor(QWidget):
         self.commit_input.editingFinished.connect(self._store_commit_hashes)
         commit_layout.addWidget(self.commit_input)
         layout.addLayout(commit_layout)
-
-        # Output Directory
-        output_layout = QHBoxLayout()
-        self.output_label = QLabel('Output Directory:')
-        output_layout.addWidget(self.output_label)
-        self.output_input = QLineEdit(self)
-        self.output_input.setText(self.config_manager.get_output_dir())  # Load last used output dir
-        self.output_input.editingFinished.connect(self._store_output_dir)
-        output_layout.addWidget(self.output_input)
-        self.output_button = QPushButton('Browse', self)
-        self.output_button.clicked.connect(self.browseOutput)
-        output_layout.addWidget(self.output_button)
-        layout.addLayout(output_layout)
 
         # Search Bar for PRs
         self.search_input = QLineEdit(self)
@@ -193,10 +188,17 @@ class GitDiffExtractor(QWidget):
     def getPRDiffs(self):
         repo_dir = self._require_active_repo_dir()
         pr_merge_commit = self.commit_input.text().strip()
-        output_dir = self.output_input.text()
+        output_dir = self.config_manager.get_output_dir().strip()
 
         if not repo_dir or not pr_merge_commit or not output_dir:
-            QMessageBox.warning(self, INPUT_ERROR, "All fields must be filled out.")
+            QMessageBox.warning(
+                self,
+                INPUT_ERROR,
+                "Active repository, commit hash, and output directory must be provided.\n"
+                "Set the output directory in Settings.",
+            )
+            if not output_dir:
+                self.tabs.setCurrentWidget(self.settings_tab)
             return
 
         try:
@@ -225,22 +227,22 @@ class GitDiffExtractor(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
-    def browseOutput(self):
-        directory = self.selectDirectory("Select Output Directory")
-        if directory:
-            self.output_input.setText(directory)
-            self.config_manager.set_output_dir(directory)  # Save to config
-
     def selectDirectory(self, title):
         """ Open a standard directory selection dialog using QFileDialog. """
         return QFileDialog.getExistingDirectory(self, title)
 
     def generateDiff(self):
         repo_dir = self._require_active_repo_dir()
-        output_dir = self.output_input.text().strip()
+        output_dir = self.config_manager.get_output_dir().strip()
 
         if not repo_dir or not output_dir:
-            QMessageBox.warning(self, INPUT_ERROR, "Active repository and output directories must be provided.")
+            QMessageBox.warning(
+                self,
+                INPUT_ERROR,
+                "Active repository and output directory must be provided.\nSet the output directory in Settings.",
+            )
+            if not output_dir:
+                self.tabs.setCurrentWidget(self.settings_tab)
             return
 
         os.makedirs(output_dir, exist_ok=True)
@@ -385,48 +387,7 @@ class GitDiffExtractor(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
 
         def execute_fetch():
-            aggregated_records = []
-            next_tokens = {}
-            repo_fetch_pairs = PRAggregationService.repos_for_page(selected_repos, cursor_state, reset)
-            for repo, repo_next in repo_fetch_pairs:
-                repo_id = str((repo or {}).get('id', ''))
-                repo_owner = (repo or {}).get('owner', '')
-                repo_slug = (repo or {}).get('slug', (repo or {}).get('name', ''))
-                repo_label = f"{repo_owner}/{repo_slug}"
-                repo_local_dir = (repo or {}).get('local_dir', '')
-
-                if provider == 'github':
-                    repo_config = self._get_github_config(repo=repo, show_dialog=False)
-                else:
-                    repo_config = self._get_bitbucket_config(repo=repo, show_dialog=False)
-
-                if not repo_config:
-                    continue
-
-                try:
-                    if provider == 'github':
-                        repo_records, repo_next_token = self._fetch_github_pull_requests_page(
-                            filter_mode, repo_config, repo_next
-                        )
-                    else:
-                        repo_records, repo_next_token = self._fetch_bitbucket_pull_requests_page(
-                            filter_mode, repo_config, repo_next
-                        )
-                except Exception:
-                    # Keep aggregated loading resilient when one repository fails.
-                    continue
-
-                for pr in repo_records:
-                    pr['repo_id'] = repo_id
-                    pr['repo_label'] = repo_label
-                    pr['repo_local_dir'] = repo_local_dir
-                aggregated_records.extend(repo_records)
-
-                next_tokens[repo_id] = repo_next_token or ''
-
-            aggregated_records.sort(key=lambda pr: pr.get('updated_on') or '', reverse=True)
-            normalized_state = PRAggregationService.normalize_next_state(selected_repos, next_tokens)
-            return aggregated_records, normalized_state
+            return self.pr_service.aggregate_pull_requests(selected_repos, filter_mode, cursor_state, reset)
 
         if not self.task_runner:
             try:
@@ -636,96 +597,7 @@ class GitDiffExtractor(QWidget):
             on_error(exc)
 
     def _search_prs_remote(self, provider, filter_mode, selected_repos, query):
-        results = []
-        if provider == 'bitbucket':
-            username = (self.config_manager.get_bitbucket_username() or '').strip()
-            password = (self.config_manager.get_bitbucket_app_password() or '').strip()
-            if not username or not password:
-                return results
-
-            state_clause = ''
-            if filter_mode == 'open':
-                state_clause = ' AND state = "OPEN"'
-            elif filter_mode == 'merged':
-                state_clause = ' AND state = "MERGED"'
-
-            escaped_query = query.replace('"', '\\"')
-            q = (
-                f'(title ~ "{escaped_query}" OR source.branch.name ~ "{escaped_query}" '
-                f'OR destination.branch.name ~ "{escaped_query}"){state_clause}'
-            )
-
-            for repo in selected_repos:
-                workspace = (repo.get('owner') or '').strip()
-                slug = (repo.get('slug') or '').strip()
-                if not workspace or not slug:
-                    continue
-                url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
-                try:
-                    response = requests.get(
-                        url,
-                        params={'pagelen': 30, 'q': q},
-                        auth=(username, password),
-                        timeout=15,
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    repo_label = f"{workspace}/{slug}"
-                    repo_local_dir = (repo.get('local_dir') or '').strip()
-                    for pr in payload.get('values', []):
-                        mapped = self._map_bitbucket_pr(pr)
-                        mapped['repo_id'] = str(repo.get('id', ''))
-                        mapped['repo_label'] = repo_label
-                        mapped['repo_local_dir'] = repo_local_dir
-                        results.append(mapped)
-                except Exception:
-                    continue
-            return results
-
-        token = (self.config_manager.get_github_token() or '').strip()
-        headers = {'Accept': 'application/vnd.github+json'}
-        if token:
-            headers['Authorization'] = f'token {token}'
-
-        state_term = ''
-        if filter_mode == 'open':
-            state_term = 'state:open'
-        elif filter_mode == 'merged':
-            state_term = 'state:closed'
-
-        for repo in selected_repos:
-            owner = (repo.get('owner') or '').strip()
-            slug = (repo.get('slug') or repo.get('name') or '').strip()
-            if not owner or not slug:
-                continue
-            search_query = f'repo:{owner}/{slug} is:pr {state_term} {query}'.strip()
-            try:
-                response = requests.get(
-                    "https://api.github.com/search/issues",
-                    params={'q': search_query, 'per_page': 30},
-                    headers=headers,
-                    timeout=15,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                repo_label = f"{owner}/{slug}"
-                repo_local_dir = (repo.get('local_dir') or '').strip()
-
-                for issue in payload.get('items', []):
-                    pr_url = (issue.get('pull_request') or {}).get('url')
-                    if not pr_url:
-                        continue
-                    pr_response = requests.get(pr_url, headers=headers, timeout=15)
-                    pr_response.raise_for_status()
-                    mapped = self._map_github_pr(pr_response.json())
-                    mapped['repo_id'] = str(repo.get('id', ''))
-                    mapped['repo_label'] = repo_label
-                    mapped['repo_local_dir'] = repo_local_dir
-                    results.append(mapped)
-            except Exception:
-                continue
-
-        return results
+        return self.pr_service.search_pull_requests(selected_repos, filter_mode, query)
 
     def _on_settings_updated(self):
         self._pr_cache.clear()
@@ -738,12 +610,39 @@ class GitDiffExtractor(QWidget):
         if (active_repo.get('provider') or '').lower() != provider:
             self.config_manager.clear_active_repository()
             self.config_manager.set_selected_repositories([])
+            self.settings_tab.clear_pending_repository_selection()
         self.create_pr_tab.setEnabled(provider == 'bitbucket')
         self._pr_cache.clear()
         self.prs = []
         self.pr_list.clear()
         self.apply_repo_config()
         self.contribution_history_tab.apply_provider_context()
+
+    def _on_tab_changed(self, index):
+        if self._handling_tab_change:
+            self._previous_tab_index = index
+            return
+
+        previous_widget = self.tabs.widget(self._previous_tab_index)
+        current_widget = self.tabs.widget(index)
+        self._previous_tab_index = index
+
+        if previous_widget is not self.settings_tab or current_widget is self.settings_tab:
+            return
+        if self._repo_activation_in_progress or not self.settings_tab.has_unsaved_repository_selection():
+            return
+
+        result = QMessageBox.question(
+            self,
+            "Save Repository Selection?",
+            "Would you like to save the selected repositories before leaving Settings?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if result == QMessageBox.Yes:
+            self.settings_tab.activate_selected_repositories()
+        else:
+            self.settings_tab.discard_unsaved_repository_selection()
 
     def _selected_filter(self):
         if self.only_pr_radio.isChecked():
@@ -817,252 +716,43 @@ class GitDiffExtractor(QWidget):
         }
 
     def _fetch_bitbucket_pull_requests_page(self, filter_mode, config, next_url=None):
-        username = config['username']
-        password = config['password']
-        slug = config['slug']
-        workspace = config['workspace']
-
-        base_url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
-        if next_url:
-            request_url = next_url
-            request_params = None
-        else:
-            states = ['OPEN'] if filter_mode == 'open' else ['MERGED'] if filter_mode == 'merged' else ['OPEN', 'MERGED']
-            request_url = base_url
-            request_params = [('pagelen', '50')]
-            request_params.extend(('state', state) for state in states)
-
-        response = requests.get(
-            request_url,
-            params=request_params,
-            auth=(username, password),
-            timeout=15,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        records = [self._map_bitbucket_pr(pr_record) for pr_record in data.get('values', [])]
-        return records, data.get('next')
+        return self.pr_service._fetch_bitbucket_pull_requests_page(filter_mode, config, next_url)
 
     @staticmethod
     def _map_bitbucket_pr(pr_record):
-        source = pr_record.get('source') or {}
-        destination = pr_record.get('destination') or {}
-        links = pr_record.get('links') or {}
-        merge_commit = pr_record.get('merge_commit') or {}
-        summary = pr_record.get('summary') or {}
-
-        return {
-            'id': pr_record.get('id'),
-            'title': pr_record.get('title'),
-            'state': (pr_record.get('state') or '').upper(),
-            'author': ((pr_record.get('author') or {}).get('display_name')),
-            'source_branch': (source.get('branch') or {}).get('name'),
-            'destination_branch': (destination.get('branch') or {}).get('name'),
-            'source_commit': (source.get('commit') or {}).get('hash'),
-            'destination_commit': (destination.get('commit') or {}).get('hash'),
-            'merge_commit': merge_commit.get('hash'),
-            'link': (links.get('html') or {}).get('href'),
-            'description': summary.get('raw') or pr_record.get('description'),
-            'updated_on': pr_record.get('updated_on'),
-            'provider': 'bitbucket',
-        }
+        return PullRequestService._map_bitbucket_pr(pr_record)
 
     def _fetch_github_pull_requests_page(self, filter_mode, config, next_url=None):
-        owner = config['owner']
-        repo = config['repo']
-        headers = config['headers']
-
-        if next_url:
-            request_url = next_url
-            request_params = None
-        else:
-            request_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-            if filter_mode == 'open':
-                state_param = 'open'
-            elif filter_mode == 'merged':
-                state_param = 'closed'
-            else:
-                state_param = 'all'
-            request_params = {'per_page': 50, 'state': state_param}
-
-        response = requests.get(
-            request_url,
-            params=request_params,
-            headers=headers,
-            timeout=15,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        records = []
-
-        for pr_record in data:
-            is_merged = bool(pr_record.get('merged_at'))
-            state = pr_record.get('state', 'open')
-
-            if filter_mode == 'merged' and not is_merged:
-                continue
-            if filter_mode == 'open' and state != 'open':
-                continue
-
-            records.append(self._map_github_pr(pr_record))
-
-        next_cursor = self._github_next_link(response.headers.get('Link'))
-        return records, next_cursor
+        return self.pr_service._fetch_github_pull_requests_page(filter_mode, config, next_url)
 
     @staticmethod
     def _map_github_pr(pr_record):
-        head = pr_record.get('head') or {}
-        base = pr_record.get('base') or {}
-        user = pr_record.get('user') or {}
-
-        merged = bool(pr_record.get('merged_at'))
-        state = 'MERGED' if merged else (pr_record.get('state') or 'open').upper()
-
-        return {
-            'id': pr_record.get('number'),
-            'title': pr_record.get('title'),
-            'state': state,
-            'author': user.get('login'),
-            'source_branch': head.get('ref'),
-            'destination_branch': base.get('ref'),
-            'source_commit': head.get('sha'),
-            'destination_commit': base.get('sha'),
-            'merge_commit': pr_record.get('merge_commit_sha'),
-            'link': pr_record.get('html_url'),
-            'description': pr_record.get('body'),
-            'updated_on': pr_record.get('updated_at'),
-            'provider': 'github',
-        }
+        return PullRequestService._map_github_pr(pr_record)
 
     @staticmethod
     def _github_next_link(link_header):
-        if not link_header:
-            return None
-
-        parts = link_header.split(',')
-        for part in parts:
-            section = part.strip().split(';')
-            if len(section) < 2:
-                continue
-            url_part = section[0].strip()
-            rel_part = section[1].strip()
-            if rel_part == 'rel="next"':
-                return url_part.strip('<>')
-
-        return None
+        return PullRequestService._github_next_link(link_header)
 
     def _generate_pr_diff(self, pr, repo_dir, output_dir):
-        pr_id = pr.get('id', 'unknown')
-        title = pr.get('title') or ''
-        state = pr.get('state') or ''
-        source_branch = pr.get('source_branch')
-        destination_branch = pr.get('destination_branch')
-
-        try:
-            subprocess.run(['git', 'fetch', 'origin'], cwd=repo_dir, check=True, capture_output=True)
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or b'').decode('utf-8', 'ignore') if isinstance(exc.stderr, bytes) else (
-                        exc.stderr or '')
-            raise RuntimeError(f"git fetch failed: {stderr.strip() or exc}") from exc
-
-        resolved_source = self._resolve_commit(repo_dir, pr.get('source_commit'), source_branch)
-        resolved_destination = self._resolve_commit(repo_dir, pr.get('destination_commit'), destination_branch)
-
-        if not resolved_source:
-            raise RuntimeError(f"Unable to resolve the source commit for PR #{pr_id} ({title}).")
-
-        if not resolved_destination:
-            raise RuntimeError(f"Unable to resolve the destination commit for PR #{pr_id} ({title}).")
-
-        merge_base = self._merge_base(repo_dir, resolved_destination, resolved_source) or resolved_destination
-
-        diff_path = self._build_pr_diff_filename(pr, output_dir)
-
-        try:
-            with open(diff_path, 'w', encoding='utf-8') as diff_file:
-                subprocess.run(
-                    ['git', 'diff', merge_base, resolved_source],
-                    cwd=repo_dir,
-                    stdout=diff_file,
-                    check=True,
-                )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or b'').decode('utf-8', 'ignore') if isinstance(exc.stderr, bytes) else (
-                        exc.stderr or '')
-            raise RuntimeError(f"git diff failed: {stderr.strip() or exc}") from exc
-
-        return diff_path, state
+        return self.diff_service.save_pr_diff(pr, repo_dir, output_dir)
 
     def _resolve_commit(self, repo_dir, commit_hash, branch_name):
-        candidates = []
-        if commit_hash:
-            candidates.append(commit_hash)
-        if branch_name:
-            candidates.append(branch_name)
-            if not branch_name.startswith('origin/'):
-                candidates.append(f'origin/{branch_name}')
-
-        for candidate in candidates:
-            resolved = self._verify_commit(repo_dir, candidate)
-            if resolved:
-                return resolved
-
-        return None
+        return self.diff_service._resolve_commit(repo_dir, commit_hash, branch_name)
 
     @staticmethod
     def _verify_commit(repo_dir, identifier):
-        if not identifier:
-            return None
-
-        try:
-            result = subprocess.run(
-                ['git', 'rev-parse', '--verify', f'{identifier}^{{commit}}'],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            return None
+        return DiffService()._verify_commit(repo_dir, identifier)
 
     @staticmethod
     def _merge_base(repo_dir, destination_commit, source_commit):
-        if not destination_commit or not source_commit:
-            return None
-
-        try:
-            result = subprocess.run(
-                ['git', 'merge-base', destination_commit, source_commit],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            merge_base = result.stdout.strip()
-            return merge_base if merge_base else None
-        except subprocess.CalledProcessError:
-            return None
+        return DiffService()._merge_base(repo_dir, destination_commit, source_commit)
 
     def _build_pr_diff_filename(self, pr, output_dir):
-        pr_id = pr.get('id', 'unknown')
-        state = (pr.get('state') or 'unknown').lower()
-        safe_title = self._safe_filename(pr.get('title'), fallback='pr')
-        filename = f"pr_{pr_id}_{state}_{safe_title}.diff"
-        return os.path.join(output_dir, filename)
+        return self.diff_service._build_pr_diff_filename(pr, output_dir)
 
     @staticmethod
     def _safe_filename(value, fallback='file'):
-        text = (value or '').strip()
-        if not text:
-            text = fallback
-        sanitized = re.sub(r'[^A-Za-z0-9._-]+', '_', text)
-        sanitized = sanitized.strip('_')
-        if not sanitized:
-            sanitized = fallback
-        return sanitized[:60]
+        return DiffService._safe_filename(value, fallback=fallback)
 
     def _set_pr_loading(self, loading, message=None):
         if loading:
@@ -1154,40 +844,7 @@ class GitDiffExtractor(QWidget):
         )
 
     def _generate_commit_diffs(self, repo_dir, commit_hashes, output_dir):
-        warnings = []
-        diff_paths = []
-
-        for commit_hash in commit_hashes:
-            parents_result = subprocess.run(
-                ['git', 'rev-list', '--parents', '-n', '1', commit_hash],
-                capture_output=True,
-                text=True,
-                cwd=repo_dir,
-                check=True,
-            )
-            parents = parents_result.stdout.strip().split()
-
-            if len(parents) == 1:
-                warnings.append(
-                    f"Commit {commit_hash} has no parents (initial commit). Skipped."
-                )
-                continue
-
-            parent_commit = parents[1]
-            diff_file_path = os.path.join(output_dir, f'{commit_hash}_diff.txt')
-            with open(diff_file_path, 'w', encoding='utf-8') as diff_file:
-                subprocess.run(
-                    ['git', 'diff', parent_commit, commit_hash],
-                    stdout=diff_file,
-                    cwd=repo_dir,
-                    check=True,
-                )
-            diff_paths.append(diff_file_path)
-
-        if not diff_paths:
-            raise RuntimeError("No diff files were generated for the provided commits.")
-
-        return diff_paths, warnings
+        return self.diff_service.save_commit_diffs(repo_dir, commit_hashes, output_dir)
 
     def onPRClick(self, item):
         """Populate the commit input based on the selected PR."""
@@ -1361,12 +1018,10 @@ class GitDiffExtractor(QWidget):
 
     def apply_repo_config(self):
         repo_dir = self.config_manager.get_repo_dir()
-        output_dir = self.config_manager.get_output_dir()
         commits = self.config_manager.get_commit_hashes()
         selected_count = len(self.config_manager.get_selected_repositories())
 
         self._set_line_edit_text(self.repo_input, repo_dir)
-        self._set_line_edit_text(self.output_input, output_dir)
         self._set_line_edit_text(self.commit_input, commits)
         if selected_count > 1:
             self.repo_label.setText(f'Primary Repository Directory ({selected_count} selected):')
@@ -1391,9 +1046,6 @@ class GitDiffExtractor(QWidget):
 
     def _store_commit_hashes(self):
         self.config_manager.set_commit_hashes(self.commit_input.text().strip())
-
-    def _store_output_dir(self):
-        self.config_manager.set_output_dir(self.output_input.text().strip())
 
 
 if __name__ == '__main__':
