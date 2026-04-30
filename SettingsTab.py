@@ -1,3 +1,6 @@
+import os
+import platform
+import subprocess
 import time
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -15,6 +18,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QFileDialog,
 )
 
 from RepositoryProvider import RepositoryProvider
@@ -52,6 +56,9 @@ class SettingsTab(QWidget):
         self.refresh_button = None
         self.activate_button = None
         self.clear_checked_button = None
+        self.output_input = None
+        self.output_browse_button = None
+        self.open_reports_button = None
 
         self._repos = []
         self._activation_in_progress = False
@@ -132,6 +139,30 @@ class SettingsTab(QWidget):
 
         layout.addWidget(self.github_group)
 
+        application_group = QGroupBox("Application Settings", self)
+        application_form = QFormLayout(application_group)
+        application_form.setLabelAlignment(Qt.AlignRight)
+        application_form.setFormAlignment(Qt.AlignLeft)
+        application_form.setContentsMargins(12, 12, 12, 12)
+        application_form.setHorizontalSpacing(12)
+        application_form.setVerticalSpacing(8)
+
+        output_layout = QHBoxLayout()
+        self.output_input = QLineEdit(self)
+        self.output_input.editingFinished.connect(self._store_output_dir)
+        output_layout.addWidget(self.output_input)
+
+        self.output_browse_button = QPushButton("Browse", self)
+        self.output_browse_button.clicked.connect(self.browse_output_dir)
+        output_layout.addWidget(self.output_browse_button)
+
+        self.open_reports_button = QPushButton("Open Reports", self)
+        self.open_reports_button.clicked.connect(self.open_reports_folder)
+        output_layout.addWidget(self.open_reports_button)
+
+        application_form.addRow(QLabel("Output Directory:"), output_layout)
+        layout.addWidget(application_group)
+
         discovery_group = QGroupBox("Repository Discovery", self)
         discovery_layout = QVBoxLayout(discovery_group)
         discovery_layout.setContentsMargins(12, 12, 12, 12)
@@ -190,6 +221,7 @@ class SettingsTab(QWidget):
 
         self._set_line_edit(self.github_owner_input, self.config.get_github_owner())
         self._set_line_edit(self.github_token_input, self.config.get_github_token())
+        self._set_line_edit(self.output_input, self.config.get_output_dir())
 
         self._selected_repo_map = {
             str((repo or {}).get("id", "")): repo
@@ -217,9 +249,6 @@ class SettingsTab(QWidget):
             self.repo_status.setText(f"Primary repository: {active_owner}/{active_name} ({active_provider})")
         else:
             self.repo_status.setText("No repository selection saved.")
-
-        if not selected_ids:
-            return
 
         self.repo_list.blockSignals(True)
         for i in range(self.repo_list.count()):
@@ -298,6 +327,37 @@ class SettingsTab(QWidget):
     def _store_github_token(self):
         self.config.set_github_token(self.github_token_input.text().strip())
         self.settingsUpdated.emit()
+
+    def _store_output_dir(self):
+        self.config.set_output_dir(self.output_input.text().strip())
+        self.settingsUpdated.emit()
+
+    def browse_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if not directory:
+            return
+        self._set_line_edit(self.output_input, directory)
+        self.config.set_output_dir(directory)
+        self.settingsUpdated.emit()
+
+    def open_reports_folder(self):
+        output_dir = self.output_input.text().strip() or self.config.get_output_dir()
+        if not output_dir:
+            QMessageBox.warning(self, "Input Error", "Set an output directory before opening saved reports.")
+            return
+        if not os.path.isdir(output_dir):
+            QMessageBox.warning(self, "Input Error", f"Output directory does not exist:\n{output_dir}")
+            return
+        self._open_path(output_dir)
+
+    @staticmethod
+    def _open_path(path):
+        if platform.system() == "Darwin":
+            subprocess.run(["open", path])
+        elif platform.system() == "Windows":
+            os.startfile(path)
+        else:
+            subprocess.run(["xdg-open", path])
 
     def discover_repositories(self, force_refresh=False):
         provider = (self.config.get_provider() or "bitbucket").lower()
@@ -384,6 +444,39 @@ class SettingsTab(QWidget):
         )
         self.activeRepositoriesChanged.emit(repos)
 
+    def has_unsaved_repository_selection(self):
+        if not self._selected_repo_map:
+            return False
+
+        selected_ids = self._repo_ids(self._selected_repo_map.values())
+        saved_ids = self._repo_ids(self.config.get_selected_repositories())
+        return selected_ids != saved_ids
+
+    def discard_unsaved_repository_selection(self):
+        self._selected_repo_map = {
+            str((repo or {}).get("id", "")): repo
+            for repo in self.config.get_selected_repositories()
+            if (repo or {}).get("id")
+        }
+        self._apply_selected_repo_selection()
+
+    def clear_pending_repository_selection(self):
+        self._selected_repo_map = {}
+        self.repo_list.blockSignals(True)
+        for i in range(self.repo_list.count()):
+            item = self.repo_list.item(i)
+            item.setCheckState(Qt.Unchecked)
+        self.repo_list.blockSignals(False)
+        self._sync_selected_repo_panel()
+
+    @staticmethod
+    def _repo_ids(repositories):
+        return {
+            str((repo or {}).get("id", ""))
+            for repo in (repositories or [])
+            if (repo or {}).get("id")
+        }
+
     def set_repository_activation_finished(self, success: bool, repos: list = None, active_repo: dict = None):
         self._activation_in_progress = False
         self._set_discovery_busy(False)
@@ -469,10 +562,4 @@ class SettingsTab(QWidget):
             self.selected_repo_list.addItem(label)
 
     def _clear_checked_repositories(self):
-        self._selected_repo_map = {}
-        self.repo_list.blockSignals(True)
-        for i in range(self.repo_list.count()):
-            item = self.repo_list.item(i)
-            item.setCheckState(Qt.Unchecked)
-        self.repo_list.blockSignals(False)
-        self._sync_selected_repo_panel()
+        self.clear_pending_repository_selection()
