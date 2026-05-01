@@ -21,6 +21,9 @@ class _FakeBackend:
     def list_pull_requests(self, **kwargs):
         return {"repository": {"slug": kwargs.get("slug", "demo")}, "records": [{"id": 1}], "next_cursor": ""}
 
+    def list_my_pull_requests(self, **kwargs):
+        return {"developer": "me", "records": [{"id": 3}], "count": 1}
+
     def find_pull_requests_by_ticket(self, **kwargs):
         return {"ticket": kwargs["ticket"], "records": [{"id": 2, "title": kwargs["ticket"]}], "count": 1}
 
@@ -59,6 +62,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("get_pr_diff", tool_names)
             self.assertIn("find_pull_requests_by_ticket", tool_names)
             self.assertIn("get_ticket_diffs", tool_names)
+            self.assertIn("list_my_pull_requests", tool_names)
 
             active_result = await session.call_tool("get_active_context", {})
             self.assertEqual(active_result.structuredContent["provider"], "github")
@@ -78,6 +82,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 {"tickets_json": '["RU-25463"]'},
             )
             self.assertEqual(ticket_diffs_result.structuredContent["tickets"][0]["count"], 1)
+
+            my_prs_result = await session.call_tool("list_my_pull_requests", {})
+            self.assertEqual(my_prs_result.structuredContent["count"], 1)
 
 
 if __name__ == "__main__":

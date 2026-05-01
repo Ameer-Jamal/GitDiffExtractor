@@ -83,6 +83,7 @@ class GitDiffMCPBackend:
         slug: str = "",
         filter_mode: str = "open",
         search_text: str = "",
+        developer: str = "",
         next_cursor: str = "",
     ) -> dict[str, Any]:
         repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug)
@@ -91,11 +92,44 @@ class GitDiffMCPBackend:
             filter_mode=filter_mode,
             next_cursor=next_cursor or None,
             search_text=search_text,
+            developer=developer,
         )
         return {
             "repository": self._repo_identity(repo),
             "records": records,
             "next_cursor": cursor or "",
+        }
+
+    def list_my_pull_requests(
+        self,
+        *,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "active",
+        filter_mode: str = "open",
+    ) -> dict[str, Any]:
+        repositories = self._ticket_search_repositories(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+        )
+        records: list[dict] = []
+        for repo in repositories:
+            repo_records, _cursor = self.pr_service.list_pull_requests_for_repo(
+                repo,
+                filter_mode=filter_mode,
+                developer="me",
+            )
+            records.extend(repo_records)
+        records.sort(key=lambda pr: pr.get("updated_on") or "", reverse=True)
+        return {
+            "scope": scope,
+            "developer": "me",
+            "repositories": [self._repo_identity(repo) for repo in repositories],
+            "records": records,
+            "count": len(records),
         }
 
     def find_pull_requests_by_ticket(
@@ -477,6 +511,7 @@ def create_mcp_server(backend: GitDiffMCPBackend | None = None):
         slug: str = "",
         filter_mode: str = "open",
         search_text: str = "",
+        developer: str = "",
         next_cursor: str = "",
     ) -> dict[str, Any]:
         """List pull requests for a repository, with optional filter and search support."""
@@ -486,7 +521,25 @@ def create_mcp_server(backend: GitDiffMCPBackend | None = None):
             slug=slug,
             filter_mode=filter_mode,
             search_text=search_text,
+            developer=developer,
             next_cursor=next_cursor,
+        )
+
+    @app.tool()
+    def list_my_pull_requests(
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "active",
+        filter_mode: str = "open",
+    ) -> dict[str, Any]:
+        """List pull requests authored by the authenticated provider user."""
+        return backend.list_my_pull_requests(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            filter_mode=filter_mode,
         )
 
     @app.tool()

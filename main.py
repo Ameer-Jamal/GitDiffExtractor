@@ -9,14 +9,16 @@ import requests
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
-                             QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup, QProgressDialog)
+                             QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup, QProgressDialog, QComboBox)
 from BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
 from ContributionHistoryTab import ContributionHistoryTab
+from contribution_models import RepositoryRef
 from CreatePrTab import CreatePRTab
 from diff_service import DiffService
 from ListDelegates import PRListDelegate, UI_ROLE
 from PRAggregationService import PRAggregationService
+from provider_api import build_provider_client
 from pull_request_service import PullRequestService
 from RepositoryProvider import RepositoryProvider
 from SettingsTab import SettingsTab
@@ -42,6 +44,8 @@ class GitDiffExtractor(QWidget):
         self.only_merges_checkbox = None
         self.pr_button = None
         self.load_more_button = None
+        self.developer_filter_combo = None
+        self._developer_suggestions_loading = False
         self._load_more_label = ''
         self.config_manager = ConfigManager()
         self.default_output_dir = self.config_manager.get_output_dir()
@@ -55,6 +59,7 @@ class GitDiffExtractor(QWidget):
         self._remote_search_inflight = False
         self._current_provider = None
         self._current_filter_mode = None
+        self._current_developer_filter = ''
         self._current_provider_config = None
         self._current_selected_repos = []
         self._current_cursor_state = {}
@@ -172,6 +177,17 @@ class GitDiffExtractor(QWidget):
         layout.addWidget(self.only_pr_radio)
         layout.addWidget(self.only_merges_radio)
         layout.addWidget(self.all_diffs_radio)
+
+        developer_layout = QHBoxLayout()
+        developer_layout.addWidget(QLabel("Developer:"))
+        self.developer_filter_combo = QComboBox(self)
+        self.developer_filter_combo.setEditable(True)
+        self.developer_filter_combo.addItem("Any developer", "")
+        self.developer_filter_combo.addItem("Me", "me")
+        if self.developer_filter_combo.lineEdit():
+            self.developer_filter_combo.lineEdit().setPlaceholderText("Me, username, display name, or email")
+        developer_layout.addWidget(self.developer_filter_combo)
+        layout.addLayout(developer_layout)
 
         # Generate Diff Button
         self.run_button = QPushButton('Generate Diff', self)
@@ -307,6 +323,7 @@ class GitDiffExtractor(QWidget):
             return
 
         filter_mode = self._selected_filter()
+        developer_filter = self._selected_developer_filter()
 
         if provider == 'github':
             provider_base_config = self._get_github_config(repo=selected_repos[0], show_dialog=True)
@@ -318,12 +335,13 @@ class GitDiffExtractor(QWidget):
 
         self._current_provider = provider
         self._current_filter_mode = filter_mode
+        self._current_developer_filter = developer_filter
         self._current_provider_config = provider_base_config
         self._current_selected_repos = selected_repos
         self._current_cursor_state = PRAggregationService.seed_cursor_state(selected_repos)
         self._last_remote_search_key = None
 
-        cache_key = (provider, tuple(sorted(repo_ids)), filter_mode)
+        cache_key = (provider, tuple(sorted(repo_ids)), filter_mode, developer_filter.lower())
         cached = self._pr_cache.get(cache_key)
         if cached:
             timestamp, cached_prs, cached_next = cached
@@ -370,6 +388,7 @@ class GitDiffExtractor(QWidget):
         self._pr_page_loading = True
         provider = self._current_provider
         filter_mode = self._current_filter_mode
+        developer_filter = self._current_developer_filter
         config = self._current_provider_config
         selected_repos = getattr(self, '_current_selected_repos', [])
 
@@ -387,7 +406,13 @@ class GitDiffExtractor(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to retrieve pull requests:\n{exc}")
 
         def execute_fetch():
-            return self.pr_service.aggregate_pull_requests(selected_repos, filter_mode, cursor_state, reset)
+            return self.pr_service.aggregate_pull_requests(
+                selected_repos,
+                filter_mode,
+                cursor_state,
+                reset,
+                developer=developer_filter,
+            )
 
         if not self.task_runner:
             try:
@@ -440,7 +465,12 @@ class GitDiffExtractor(QWidget):
         self.load_more_button.setEnabled(PRAggregationService.has_more(self._current_cursor_state))
 
         repo_ids = [str((repo or {}).get('id', '')) for repo in getattr(self, '_current_selected_repos', []) if (repo or {}).get('id')]
-        cache_key = (self._current_provider, tuple(sorted(repo_ids)), self._current_filter_mode)
+        cache_key = (
+            self._current_provider,
+            tuple(sorted(repo_ids)),
+            self._current_filter_mode,
+            (self._current_developer_filter or '').lower(),
+        )
         self._pr_cache[cache_key] = (
             time.time(),
             list(self.prs),
@@ -537,9 +567,10 @@ class GitDiffExtractor(QWidget):
     def _trigger_remote_pr_search(self, query):
         provider = self._current_provider or (self.config_manager.get_provider() or 'bitbucket').lower()
         filter_mode = self._current_filter_mode or self._selected_filter()
+        developer_filter = self._current_developer_filter or self._selected_developer_filter()
         selected_repos = getattr(self, '_current_selected_repos', []) or self.config_manager.get_selected_repositories()
         repo_ids = tuple(sorted(str((repo or {}).get('id', '')) for repo in selected_repos if (repo or {}).get('id')))
-        search_key = (provider, filter_mode, repo_ids, query)
+        search_key = (provider, filter_mode, repo_ids, query, developer_filter.lower())
 
         if self._remote_search_inflight:
             return
@@ -580,7 +611,7 @@ class GitDiffExtractor(QWidget):
             self._last_remote_search_key = None
 
         def task():
-            return self._search_prs_remote(provider, filter_mode, selected_repos, query)
+            return self._search_prs_remote(provider, filter_mode, selected_repos, query, developer_filter)
 
         if self.task_runner:
             self.task_runner.run(
@@ -596,8 +627,13 @@ class GitDiffExtractor(QWidget):
         except Exception as exc:  # noqa: BLE001
             on_error(exc)
 
-    def _search_prs_remote(self, provider, filter_mode, selected_repos, query):
-        return self.pr_service.search_pull_requests(selected_repos, filter_mode, query)
+    def _search_prs_remote(self, provider, filter_mode, selected_repos, query, developer_filter=''):
+        return self.pr_service.search_pull_requests(
+            selected_repos,
+            filter_mode,
+            query,
+            developer=developer_filter,
+        )
 
     def _on_settings_updated(self):
         self._pr_cache.clear()
@@ -650,6 +686,24 @@ class GitDiffExtractor(QWidget):
         if self.only_merges_radio.isChecked():
             return 'merged'
         return 'all'
+
+    def _selected_developer_filter(self):
+        if not self.developer_filter_combo:
+            return ''
+        data = self.developer_filter_combo.currentData()
+        text = (self.developer_filter_combo.currentText() or '').strip()
+        if data:
+            if str(data).startswith('__'):
+                return ''
+            return str(data).strip()
+        if text.lower() in {
+            'any developer',
+            'loading developers...',
+            'developer suggestions unavailable',
+            'no developer suggestions loaded yet',
+        }:
+            return ''
+        return text
 
     def _get_bitbucket_config(self, repo=None, show_dialog=True):
         username = (self.config_manager.get_bitbucket_username() or '').strip()
@@ -774,6 +828,7 @@ class GitDiffExtractor(QWidget):
             self.only_pr_radio,
             self.only_merges_radio,
             self.all_diffs_radio,
+            self.developer_filter_combo,
             self.load_more_button,
         ]
         for widget in widgets:
@@ -938,6 +993,7 @@ class GitDiffExtractor(QWidget):
             self._pr_cache.clear()
             self.contribution_history_tab.apply_provider_context()
             self.apply_repo_config()
+            self._refresh_pr_developer_suggestions()
             self._repo_activation_in_progress = False
             self._set_repo_activation_ui(False)
             self.settings_tab.set_repository_activation_finished(True, prepared, active_repo)
@@ -1037,6 +1093,7 @@ class GitDiffExtractor(QWidget):
         self.create_pr_tab.apply_repo_config()
         provider = (self.config_manager.get_provider() or 'bitbucket').lower()
         self.create_pr_tab.setEnabled(provider == 'bitbucket')
+        self._refresh_pr_developer_suggestions()
 
     @staticmethod
     def _set_line_edit_text(line_edit, value):
@@ -1046,6 +1103,140 @@ class GitDiffExtractor(QWidget):
 
     def _store_commit_hashes(self):
         self.config_manager.set_commit_hashes(self.commit_input.text().strip())
+
+    def _refresh_pr_developer_suggestions(self):
+        if self._developer_suggestions_loading or not self.developer_filter_combo:
+            return
+
+        repositories = self.config_manager.get_selected_repositories()
+        if not repositories:
+            active_repo = self.config_manager.get_active_repository()
+            repositories = [active_repo] if active_repo and active_repo.get('slug') else []
+        if not repositories:
+            self._merge_pr_developer_candidates([])
+            return
+
+        self._developer_suggestions_loading = True
+        self.developer_filter_combo.setToolTip("Developer suggestions are loading. You can still type a username or display name.")
+        self._merge_pr_developer_candidates([], loading=True)
+
+        def task():
+            provider = build_provider_client(self.config_manager)
+            candidates = []
+            seen = set()
+
+            try:
+                user = provider.validate_credentials()
+                for value in (user.username, user.display_name, user.email):
+                    item = (value or '').strip()
+                    key = item.lower()
+                    if item and key not in seen:
+                        seen.add(key)
+                        candidates.append(item)
+            except Exception:
+                pass
+
+            for repo in repositories:
+                repo_ref = RepositoryRef.from_dict(repo)
+                if not repo_ref.slug:
+                    continue
+                try:
+                    values = provider.list_developer_candidates(repo_ref, limit=40)
+                except Exception:
+                    continue
+                for value in values:
+                    item = (value or '').strip()
+                    key = item.lower()
+                    if item and key not in seen:
+                        seen.add(key)
+                        candidates.append(item)
+
+            return sorted(candidates, key=lambda item: item.lower())
+
+        def on_result(candidates):
+            self._merge_pr_developer_candidates(candidates or [])
+
+        def on_finished():
+            self._developer_suggestions_loading = False
+            if self.developer_filter_combo:
+                self.developer_filter_combo.setToolTip("")
+
+        if self.task_runner:
+            self.task_runner.run(
+                task,
+                description="Load PR Developer Suggestions",
+                on_result=on_result,
+                on_error=lambda _exc: self._merge_pr_developer_candidates([], load_failed=True),
+                on_finished=on_finished,
+            )
+            return
+
+        try:
+            on_result(task())
+        finally:
+            on_finished()
+
+    def _merge_pr_developer_candidates(self, candidates, loading=False, load_failed=False):
+        if not self.developer_filter_combo:
+            return
+
+        current_text = (self.developer_filter_combo.currentText() or '').strip()
+        current_data = self.developer_filter_combo.currentData()
+        selected_value = str(current_data or current_text or '').strip()
+
+        values = []
+        seen = set()
+        for label, data in (("Any developer", ""), ("Me", "me")):
+            key = data or label.lower()
+            seen.add(key)
+            values.append((label, data))
+
+        if loading:
+            values.append(("Loading developers...", "__loading__"))
+        elif load_failed:
+            values.append(("Developer suggestions unavailable", "__unavailable__"))
+        elif candidates == []:
+            values.append(("No developer suggestions loaded yet", "__empty__"))
+
+        for candidate in candidates or []:
+            text = (candidate or '').strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            values.append((text, text))
+
+        block = self.developer_filter_combo.blockSignals(True)
+        self.developer_filter_combo.clear()
+        for label, data in values:
+            self.developer_filter_combo.addItem(label, data)
+            if str(data).startswith('__'):
+                index = self.developer_filter_combo.count() - 1
+                item = self.developer_filter_combo.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
+
+        restore_index = -1
+        if selected_value:
+            for index in range(self.developer_filter_combo.count()):
+                data = str(self.developer_filter_combo.itemData(index) or '').strip()
+                label = (self.developer_filter_combo.itemText(index) or '').strip()
+                if selected_value.lower() in {data.lower(), label.lower()}:
+                    restore_index = index
+                    break
+        if restore_index >= 0:
+            self.developer_filter_combo.setCurrentIndex(restore_index)
+        elif current_text and current_text.lower() not in {
+            'any developer',
+            'me',
+            'loading developers...',
+            'developer suggestions unavailable',
+            'no developer suggestions loaded yet',
+        }:
+            self.developer_filter_combo.setEditText(current_text)
+        else:
+            self.developer_filter_combo.setCurrentIndex(0)
+        self.developer_filter_combo.blockSignals(block)
 
 
 if __name__ == '__main__':

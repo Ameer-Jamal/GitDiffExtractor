@@ -63,6 +63,52 @@ class PullRequestServiceTests(unittest.TestCase):
         self.assertEqual(records[0]["id"], 99)
 
     @patch("pull_request_service.requests.get")
+    def test_list_pull_requests_for_repo_uses_provider_query_for_developer(self, mock_get):
+        search_response = MagicMock()
+        search_response.json.return_value = {
+            "items": [
+                {
+                    "pull_request": {"url": "https://api.github.com/repos/openai/demo/pulls/99"},
+                }
+            ]
+        }
+        pr_response = MagicMock()
+        pr_response.json.return_value = {
+            "number": 99,
+            "title": "Mine",
+            "state": "open",
+            "merged_at": None,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "head": {"ref": "feature/x", "sha": "abc"},
+            "base": {"ref": "main", "sha": "def"},
+            "user": {"login": "ajamal"},
+            "html_url": "https://example/pr/99",
+            "body": "Details",
+        }
+        mock_get.side_effect = [search_response, pr_response]
+
+        records, next_cursor = self.service.list_pull_requests_for_repo(
+            self.repo,
+            filter_mode="open",
+            developer="ajamal",
+        )
+
+        self.assertIsNone(next_cursor)
+        self.assertEqual(records[0]["id"], 99)
+        self.assertIn("author:ajamal", mock_get.call_args_list[0].kwargs["params"]["q"])
+
+    def test_bitbucket_query_expression_omits_author_fields_for_api_compatibility(self):
+        expression = PullRequestService._bitbucket_query_expression(
+            "RU-123",
+            "Zaid",
+            ' AND state = "OPEN"',
+        )
+
+        self.assertIn('title ~ "RU-123"', expression)
+        self.assertNotIn("author.", expression)
+        self.assertIn('state = "OPEN"', expression)
+
+    @patch("pull_request_service.requests.get")
     def test_search_pull_requests_uses_issue_search_and_pr_fetch(self, mock_get):
         search_response = MagicMock()
         search_response.json.return_value = {

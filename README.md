@@ -127,7 +127,8 @@ The MCP server gives an AI client read-only access to the same repository contex
 - inspect the active provider/repository context
 - list accessible repositories
 - list the selected repositories saved by the desktop app
-- list/search pull requests for a repository
+- list/search pull requests for a repository, optionally filtered by developer
+- list pull requests authored by the authenticated provider user
 - find pull requests by ticket id, including multiple PRs for the same ticket
 - retrieve grouped PR diffs for one or more tickets
 - retrieve a pull request diff
@@ -143,6 +144,7 @@ The server may clone or fetch local repositories when a diff tool needs a checko
 - `list_repositories`
 - `get_selected_repositories`
 - `list_pull_requests`
+- `list_my_pull_requests`
 - `find_pull_requests_by_ticket`
 - `get_ticket_diffs`
 - `get_pr_diff`
@@ -174,6 +176,30 @@ Use the Git Diff Extractor MCP server to test basic functionality.
 4. Call find_pull_requests_by_ticket with ticket="RU-25463" and summarize any matching PRs.
 5. Do not call get_pr_diff yet unless I explicitly ask, because diffs can be large.
 6. If any tool fails, report the exact tool name and error.
+```
+
+Developer PR prompt:
+
+```text
+Use the Git Diff Extractor MCP server to list my open pull requests across selected repositories.
+
+Call list_my_pull_requests with:
+scope="selected"
+filter_mode="open"
+
+Return the repo, PR id, title, source branch, target branch, and link for each PR.
+```
+
+To inspect another developer:
+
+```text
+Use the Git Diff Extractor MCP server to list Ameer's merged pull requests across selected repositories.
+
+Call list_pull_requests for each selected repository with:
+developer="Ameer"
+filter_mode="merged"
+
+Summarize the PR ids, titles, repos, and branches.
 ```
 
 If that works, test a specific diff with a follow-up prompt:
@@ -293,6 +319,7 @@ You can add more environment variables under `[mcp_servers.gitDiffExtractor.env]
 - This MCP server is currently **local stdio only**. It is intended for local MCP clients.
 - MCP is the protocol/integration point. Codex is just one supported client example.
 - If you already saved credentials and repository selections in the desktop app, you usually do **not** need to pass env vars.
+- Developer filters use provider-side author search where supported. Bitbucket does not support filtering PRs by author fields in its query API, so the app applies state/search filters through Bitbucket first and then filters authors locally.
 - If your AI client does not automatically choose the server, mention it explicitly in your prompt.
 - You do **not** need to reinstall/register the MCP server after code changes when the command path stays the same.
 - Restart your MCP client after code changes so it starts a fresh server process and reloads tool definitions.

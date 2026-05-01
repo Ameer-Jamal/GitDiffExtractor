@@ -6,6 +6,7 @@ from typing import Optional
 import requests
 
 from PRAggregationService import PRAggregationService
+from provider_api import ProviderClient
 
 
 _TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b", re.IGNORECASE)
@@ -21,17 +22,19 @@ class PullRequestService:
         filter_mode: str,
         cursor_state: dict[str, str],
         reset: bool,
+        developer: str = "",
     ) -> tuple[list[dict], dict[str, str]]:
-        provider = (self.config.get_provider() or "bitbucket").lower()
         aggregated_records: list[dict] = []
         next_tokens: dict[str, str] = {}
         repo_fetch_pairs = PRAggregationService.repos_for_page(selected_repos, cursor_state, reset)
+        resolved_developer = self.resolve_developer_filter(developer)
 
         for repo, repo_next in repo_fetch_pairs:
             repo_records, repo_next_token = self.list_pull_requests_for_repo(
                 repo,
                 filter_mode=filter_mode,
                 next_cursor=repo_next or None,
+                developer=resolved_developer,
             )
             aggregated_records.extend(repo_records)
             next_tokens[str((repo or {}).get("id", ""))] = repo_next_token or ""
@@ -47,21 +50,33 @@ class PullRequestService:
         filter_mode: str = "open",
         next_cursor: Optional[str] = None,
         search_text: str = "",
+        developer: str = "",
     ) -> tuple[list[dict], Optional[str]]:
         provider = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
+        resolved_developer = self.resolve_developer_filter(developer)
         if search_text:
-            return self.search_pull_requests([repo], filter_mode, search_text), None
+            return self.search_pull_requests([repo], filter_mode, search_text, developer=resolved_developer), None
+        if resolved_developer:
+            return self.search_pull_requests([repo], filter_mode, "", developer=resolved_developer), None
         if provider == "github":
             config = self._get_github_config(repo)
             records, cursor = self._fetch_github_pull_requests_page(filter_mode, config, next_cursor=next_cursor)
         else:
             config = self._get_bitbucket_config(repo)
             records, cursor = self._fetch_bitbucket_pull_requests_page(filter_mode, config, next_cursor=next_cursor)
-        return [self._attach_repo_context(pr, repo) for pr in records], cursor
+        records = [self._attach_repo_context(pr, repo) for pr in records]
+        return self._filter_by_developer(records, resolved_developer), cursor
 
-    def search_pull_requests(self, selected_repos: list[dict], filter_mode: str, query: str) -> list[dict]:
+    def search_pull_requests(
+        self,
+        selected_repos: list[dict],
+        filter_mode: str,
+        query: str,
+        developer: str = "",
+    ) -> list[dict]:
         provider = (self.config.get_provider() or "bitbucket").lower()
         results: list[dict] = []
+        resolved_developer = self.resolve_developer_filter(developer)
         if provider == "bitbucket":
             username = (self.config.get_bitbucket_username() or "").strip()
             password = (self.config.get_bitbucket_app_password() or "").strip()
@@ -74,27 +89,31 @@ class PullRequestService:
             elif filter_mode == "merged":
                 state_clause = ' AND state = "MERGED"'
 
-            escaped_query = query.replace('"', '\\"')
-            expression = (
-                f'(title ~ "{escaped_query}" OR source.branch.name ~ "{escaped_query}" '
-                f'OR destination.branch.name ~ "{escaped_query}"){state_clause}'
-            )
+            expression = self._bitbucket_query_expression(query, "", state_clause)
 
             for repo in selected_repos:
                 workspace = (repo.get("owner") or "").strip()
                 slug = (repo.get("slug") or "").strip()
                 if not workspace or not slug:
                     continue
-                response = requests.get(
-                    f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests",
-                    params={"pagelen": 30, "q": expression},
-                    auth=(username, password),
-                    timeout=15,
-                )
-                response.raise_for_status()
-                for pr in response.json().get("values", []):
-                    results.append(self._attach_repo_context(self._map_bitbucket_pr(pr), repo))
-            return results
+                next_url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
+                params = {"pagelen": 50}
+                if expression:
+                    params["q"] = expression
+                while next_url:
+                    response = requests.get(
+                        next_url,
+                        params=params,
+                        auth=(username, password),
+                        timeout=15,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    for pr in payload.get("values", []):
+                        results.append(self._attach_repo_context(self._map_bitbucket_pr(pr), repo))
+                    next_url = payload.get("next")
+                    params = None
+            return self._filter_by_developer(results, resolved_developer)
 
         token = (self.config.get_github_token() or "").strip()
         headers = {"Accept": "application/vnd.github+json"}
@@ -112,7 +131,7 @@ class PullRequestService:
             slug = (repo.get("slug") or repo.get("name") or "").strip()
             if not owner or not slug:
                 continue
-            search_query = f"repo:{owner}/{slug} is:pr {state_term} {query}".strip()
+            search_query = self._github_search_query(owner, slug, state_term, query, resolved_developer)
             response = requests.get(
                 "https://api.github.com/search/issues",
                 params={"q": search_query, "per_page": 30},
@@ -128,7 +147,7 @@ class PullRequestService:
                 pr_response.raise_for_status()
                 results.append(self._attach_repo_context(self._map_github_pr(pr_response.json()), repo))
 
-        return results
+        return self._filter_by_developer(results, resolved_developer)
 
     def find_pull_requests_by_ticket(
         self,
@@ -156,6 +175,19 @@ class PullRequestService:
             reverse=True,
         )
         return exact_matches
+
+    def resolve_developer_filter(self, developer: str) -> str:
+        value = (developer or "").strip()
+        if value.lower() not in {"me", "@me", "self", "mine"}:
+            return value
+        provider = self._provider_client()
+        user = provider.validate_credentials()
+        aliases = [
+            user.username,
+            user.display_name,
+            user.email,
+        ]
+        return ", ".join(alias for alias in aliases if alias)
 
     def get_pull_request(self, repo: dict, pr_id: str | int) -> dict:
         provider = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
@@ -277,6 +309,82 @@ class PullRequestService:
         return repo_copy
 
     @staticmethod
+    def _matches_developer(*candidates: str, developer: str) -> bool:
+        developer = (developer or "").strip()
+        if not developer:
+            return True
+        terms = [part.strip().lower() for part in re.split(r"[,\n;]+", developer) if part.strip()]
+        values = [value.strip().lower() for value in candidates if value]
+        for term in terms:
+            if any(term in value for value in values):
+                return True
+            normalized_term = re.sub(r"[^a-z0-9]+", "", term)
+            if not normalized_term:
+                continue
+            for value in values:
+                normalized_value = re.sub(r"[^a-z0-9]+", "", value)
+                if normalized_value and (
+                    normalized_term in normalized_value or normalized_value in normalized_term
+                ):
+                    return True
+        return False
+
+    def _filter_by_developer(self, records: list[dict], developer: str) -> list[dict]:
+        if not (developer or "").strip():
+            return records
+        return [
+            pr
+            for pr in records
+            if self._matches_developer(
+                pr.get("author") or "",
+                pr.get("author_username") or "",
+                pr.get("author_nickname") or "",
+                pr.get("author_email") or "",
+                pr.get("author_account_id") or "",
+                developer=developer,
+            )
+        ]
+
+    def _provider_client(self) -> ProviderClient:
+        from provider_api import build_provider_client
+
+        return build_provider_client(self.config)
+
+    @staticmethod
+    def _bitbucket_query_expression(query: str, developer: str, state_clause: str) -> str:
+        clauses: list[str] = []
+        query = (query or "").strip()
+        if query:
+            escaped_query = query.replace('"', '\\"')
+            clauses.append(
+                f'(title ~ "{escaped_query}" OR source.branch.name ~ "{escaped_query}" '
+                f'OR destination.branch.name ~ "{escaped_query}")'
+            )
+        expression = " AND ".join(clauses) if clauses else ""
+        if state_clause:
+            expression = f"{expression}{state_clause}" if expression else state_clause.replace(" AND ", "", 1)
+        return expression
+
+    @staticmethod
+    def _github_search_query(owner: str, slug: str, state_term: str, query: str, developer: str) -> str:
+        terms = [f"repo:{owner}/{slug}", "is:pr"]
+        if state_term:
+            terms.append(state_term)
+        query = (query or "").strip()
+        if query:
+            terms.append(query)
+        developer_terms = [
+            part.strip()
+            for part in re.split(r"[,\n;]+", developer or "")
+            if part.strip()
+        ]
+        if developer_terms:
+            # GitHub search only supports exact login for author. Use the first alias
+            # and keep local filtering as a backstop for non-login aliases.
+            terms.append(f"author:{developer_terms[0]}")
+        return " ".join(terms).strip()
+
+    @staticmethod
     def extract_ticket_id(value: str) -> str:
         match = _TICKET_PATTERN.search(value or "")
         return match.group(0).upper() if match else ""
@@ -307,6 +415,9 @@ class PullRequestService:
             "title": pr_record.get("title"),
             "state": (pr_record.get("state") or "").upper(),
             "author": ((pr_record.get("author") or {}).get("display_name")),
+            "author_username": ((pr_record.get("author") or {}).get("username")),
+            "author_nickname": ((pr_record.get("author") or {}).get("nickname")),
+            "author_account_id": ((pr_record.get("author") or {}).get("account_id")),
             "source_branch": (source.get("branch") or {}).get("name"),
             "destination_branch": (destination.get("branch") or {}).get("name"),
             "source_commit": (source.get("commit") or {}).get("hash"),
@@ -330,6 +441,7 @@ class PullRequestService:
             "title": pr_record.get("title"),
             "state": state,
             "author": user.get("login"),
+            "author_username": user.get("login"),
             "source_branch": head.get("ref"),
             "destination_branch": base.get("ref"),
             "source_commit": head.get("sha"),
