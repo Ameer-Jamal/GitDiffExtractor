@@ -3,7 +3,10 @@
 ### **Overview**
 
 The **Git Diff Extractor** is a desktop application and local MCP server for collecting repository context that AI tools can use directly. It helps you inspect pull requests, generate diffs, query contribution history, and expose that same data to MCP-compatible agents.
-<img width="819" height="949" alt="image" src="https://github.com/user-attachments/assets/5625785f-8f7c-4e7d-9b84-200467c74a6c" />
+<div>
+   <img width="847" height="1096" alt="image" src="https://github.com/user-attachments/assets/602ab657-83f6-4f79-ad68-f27c98abe92d" />
+   <img width="1074" height="917" alt="image" src="https://github.com/user-attachments/assets/11f8c2eb-4ba7-4490-811e-702f9eb3fee4" />
+</div>
 
 ---
 
