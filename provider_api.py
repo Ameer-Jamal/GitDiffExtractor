@@ -513,39 +513,48 @@ class BitbucketProviderClient(ProviderClient):
         cancel_check: CancelCheck = None,
     ) -> list[str]:
         username, password = self._auth()
-        next_url = (
-            f"https://api.bitbucket.org/2.0/repositories/"
-            f"{repository.workspace}/{repository.slug}/pullrequests?state=MERGED&pagelen=50"
-        )
         seen: set[str] = set()
         candidates: list[str] = []
-        while next_url and len(candidates) < limit:
-            if _should_cancel(cancel_check):
-                break
-            try:
-                data = _get_bitbucket_page_with_resume(next_url, auth=(username, password), timeout=20)
-            except Exception as exc:  # noqa: BLE001
-                if candidates and _is_rate_limited_exception(exc):
+
+        # Keep suggestions responsive: sample recent open PRs first, then recent
+        # merged PRs. Full history scans belong to contribution queries.
+        for state in ("OPEN", "MERGED"):
+            next_url = (
+                f"https://api.bitbucket.org/2.0/repositories/"
+                f"{repository.workspace}/{repository.slug}/pullrequests"
+                f"?state={state}&pagelen=50&sort=-updated_on"
+            )
+            pages_read = 0
+            while next_url and len(candidates) < limit and pages_read < 1:
+                if _should_cancel(cancel_check):
                     break
-                raise
-            for pr in data.get("values", []):
-                author = pr.get("author") or {}
-                for value in (
-                    author.get("display_name") or "",
-                    author.get("username") or "",
-                    author.get("nickname") or "",
-                ):
-                    item = (value or "").strip()
-                    key = item.lower()
-                    if not item or key in seen:
-                        continue
-                    seen.add(key)
-                    candidates.append(item)
+                try:
+                    data = _get_bitbucket_page_with_resume(next_url, auth=(username, password), timeout=20)
+                except Exception as exc:  # noqa: BLE001
+                    if candidates and _is_rate_limited_exception(exc):
+                        break
+                    raise
+                pages_read += 1
+                for pr in data.get("values", []):
+                    author = pr.get("author") or {}
+                    for value in (
+                        author.get("display_name") or "",
+                        author.get("username") or "",
+                        author.get("nickname") or "",
+                    ):
+                        item = (value or "").strip()
+                        key = item.lower()
+                        if not item or key in seen:
+                            continue
+                        seen.add(key)
+                        candidates.append(item)
+                        if len(candidates) >= limit:
+                            break
                     if len(candidates) >= limit:
                         break
-                if len(candidates) >= limit:
-                    break
-            next_url = data.get("next")
+                next_url = data.get("next")
+            if len(candidates) >= limit or _should_cancel(cancel_check):
+                break
         return candidates
 
 
@@ -792,33 +801,35 @@ class GitHubProviderClient(ProviderClient):
         cancel_check: CancelCheck = None,
     ) -> list[str]:
         headers = self._headers()
-        page = 1
         seen: set[str] = set()
         candidates: list[str] = []
-        while len(candidates) < limit:
-            if _should_cancel(cancel_check):
-                break
-            values = _get_json_with_retry(
-                f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/pulls",
-                params={"state": "closed", "per_page": 100, "page": page, "sort": "updated", "direction": "desc"},
-                headers=headers,
-                timeout=20,
-            )
-            if not values:
-                break
-            for pr in values:
-                if not pr.get("merged_at"):
-                    continue
-                login = ((pr.get("user") or {}).get("login")) or ""
-                item = login.strip()
-                key = item.lower()
-                if not item or key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(item)
-                if len(candidates) >= limit:
+
+        for state in ("open", "closed"):
+            page = 1
+            while len(candidates) < limit and page <= 1:
+                if _should_cancel(cancel_check):
                     break
-            page += 1
+                values = _get_json_with_retry(
+                    f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/pulls",
+                    params={"state": state, "per_page": 100, "page": page, "sort": "updated", "direction": "desc"},
+                    headers=headers,
+                    timeout=20,
+                )
+                if not values:
+                    break
+                for pr in values:
+                    login = ((pr.get("user") or {}).get("login")) or ""
+                    item = login.strip()
+                    key = item.lower()
+                    if not item or key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append(item)
+                    if len(candidates) >= limit:
+                        break
+                page += 1
+            if len(candidates) >= limit or _should_cancel(cancel_check):
+                break
         return candidates
 
 
