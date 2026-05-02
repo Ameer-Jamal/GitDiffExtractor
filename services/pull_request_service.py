@@ -5,8 +5,8 @@ from typing import Optional
 
 import requests
 
-from PRAggregationService import PRAggregationService
-from provider_api import ProviderClient
+from services.PRAggregationService import PRAggregationService
+from services.provider_api import ProviderClient
 
 
 _TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b", re.IGNORECASE)
@@ -346,7 +346,7 @@ class PullRequestService:
         ]
 
     def _provider_client(self) -> ProviderClient:
-        from provider_api import build_provider_client
+        from services.provider_api import build_provider_client
 
         return build_provider_client(self.config)
 

@@ -11,7 +11,7 @@ from typing import Callable, Optional
 import requests
 
 from ConfigManager import ConfigManager
-from contribution_models import RepositoryRef, normalize_record_datetime
+from models.contribution_models import RepositoryRef, normalize_record_datetime
 
 
 CancelCheck = Optional[Callable[[], bool]]

@@ -1,6 +1,6 @@
 import unittest
 
-from PRAggregationService import PRAggregationService
+from services.PRAggregationService import PRAggregationService
 
 
 class PRAggregationServiceTests(unittest.TestCase):

@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 import unittest
 
-from diff_service import DiffService
+from services.diff_service import DiffService
 
 
 class DiffServiceTests(unittest.TestCase):

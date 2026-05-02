@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from pull_request_service import PullRequestService
+from services.pull_request_service import PullRequestService
 
 
 class _Config:
@@ -35,7 +35,7 @@ class PullRequestServiceTests(unittest.TestCase):
             "local_dir": "/tmp/demo",
         }
 
-    @patch("pull_request_service.requests.get")
+    @patch("services.pull_request_service.requests.get")
     def test_list_pull_requests_for_repo_attaches_context(self, mock_get):
         response = MagicMock()
         response.json.return_value = [
@@ -62,7 +62,7 @@ class PullRequestServiceTests(unittest.TestCase):
         self.assertEqual(records[0]["repo_local_dir"], "/tmp/demo")
         self.assertEqual(records[0]["id"], 99)
 
-    @patch("pull_request_service.requests.get")
+    @patch("services.pull_request_service.requests.get")
     def test_list_pull_requests_for_repo_uses_provider_query_for_developer(self, mock_get):
         search_response = MagicMock()
         search_response.json.return_value = {
@@ -108,7 +108,7 @@ class PullRequestServiceTests(unittest.TestCase):
         self.assertNotIn("author.", expression)
         self.assertIn('state = "OPEN"', expression)
 
-    @patch("pull_request_service.requests.get")
+    @patch("services.pull_request_service.requests.get")
     def test_search_pull_requests_uses_issue_search_and_pr_fetch(self, mock_get):
         search_response = MagicMock()
         search_response.json.return_value = {
@@ -139,7 +139,7 @@ class PullRequestServiceTests(unittest.TestCase):
         self.assertEqual(records[0]["id"], 99)
         self.assertEqual(records[0]["repo_id"], "1")
 
-    @patch("pull_request_service.requests.get")
+    @patch("services.pull_request_service.requests.get")
     def test_find_pull_requests_by_ticket_extracts_ticket_and_filters_exact_matches(self, mock_get):
         search_response = MagicMock()
         search_response.json.return_value = {

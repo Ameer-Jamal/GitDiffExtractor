@@ -1,8 +1,8 @@
 from datetime import date
 import unittest
 
-from contribution_history_service import ContributionHistoryService
-from contribution_models import ContributionHistoryQuery, ContributionScope, RepositoryRef
+from services.contribution_history_service import ContributionHistoryService
+from models.contribution_models import ContributionHistoryQuery, ContributionScope, RepositoryRef
 
 
 class _FakeProvider:

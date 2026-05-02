@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from RepositoryProvider import RepositoryProvider, RepositoryProviderError
+from services.RepositoryProvider import RepositoryProvider, RepositoryProviderError
 
 
 class RepositoryProviderTests(unittest.TestCase):

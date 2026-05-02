@@ -7,14 +7,14 @@ from datetime import date
 from typing import Any, Optional
 
 from ConfigManager import ConfigManager
-from RepositoryProvider import RepositoryProvider
-from contribution_history_service import ContributionHistoryService
-from contribution_models import ContributionHistoryQuery, RepositoryRef
-from diff_service import DiffService
+from services.RepositoryProvider import RepositoryProvider
+from services.contribution_history_service import ContributionHistoryService
+from models.contribution_models import ContributionHistoryQuery, RepositoryRef
+from services.diff_service import DiffService
 from headless_config import HeadlessConfig
-from provider_api import build_provider_client
-from pull_request_service import PullRequestService
-from scope_manager import ScopeManager
+from services.provider_api import build_provider_client
+from services.pull_request_service import PullRequestService
+from services.scope_manager import ScopeManager
 
 try:
     from mcp.server.fastmcp import FastMCP

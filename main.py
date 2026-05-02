@@ -10,19 +10,19 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QListWidget,
                              QListWidgetItem, QTabWidget, QRadioButton, QButtonGroup, QProgressDialog, QComboBox)
-from BranchCommitViewer import BranchCommitViewer
+from ui.BranchCommitViewer import BranchCommitViewer
 from ConfigManager import ConfigManager
-from ContributionHistoryTab import ContributionHistoryTab
-from contribution_models import RepositoryRef
-from CreatePrTab import CreatePRTab
-from diff_service import DiffService
-from ListDelegates import PRListDelegate, UI_ROLE
-from PRAggregationService import PRAggregationService
-from provider_api import build_provider_client
-from pull_request_service import PullRequestService
-from RepositoryProvider import RepositoryProvider
-from SettingsTab import SettingsTab
-from TaskRunner import TaskRunner
+from ui.ContributionHistoryTab import ContributionHistoryTab
+from models.contribution_models import RepositoryRef
+from ui.CreatePrTab import CreatePRTab
+from services.diff_service import DiffService
+from ui.ListDelegates import PRListDelegate, UI_ROLE
+from services.PRAggregationService import PRAggregationService
+from services.provider_api import build_provider_client
+from services.pull_request_service import PullRequestService
+from services.RepositoryProvider import RepositoryProvider
+from ui.SettingsTab import SettingsTab
+from ui.TaskRunner import TaskRunner
 
 DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'etqdev').strip() or 'etqdev'
 

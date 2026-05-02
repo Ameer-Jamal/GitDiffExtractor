@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QLabel,
 )
-from ListDelegates import BranchListDelegate, UI_ROLE
+from ui.ListDelegates import BranchListDelegate, UI_ROLE
 
 
 class BranchCommitViewer(QWidget):

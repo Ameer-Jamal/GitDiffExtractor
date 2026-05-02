@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Optional
 
-from contribution_models import (
+from models.contribution_models import (
     ContributionHistoryQuery,
     ContributionHistoryResult,
     ContributionRecord,
@@ -16,8 +16,8 @@ from contribution_models import (
     RepositoryRef,
     normalize_record_datetime,
 )
-from provider_api import ProviderClient
-from scope_manager import ScopeManager
+from services.provider_api import ProviderClient
+from services.scope_manager import ScopeManager
 
 _TICKET_PATTERN = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
 

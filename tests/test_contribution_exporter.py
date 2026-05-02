@@ -1,8 +1,8 @@
 from datetime import datetime
 import unittest
 
-from contribution_exporter import ContributionExportService
-from contribution_models import ContributionHistoryResult, ContributionRecord, ContributionScope, RepositoryRef
+from services.contribution_exporter import ContributionExportService
+from models.contribution_models import ContributionHistoryResult, ContributionRecord, ContributionScope, RepositoryRef
 
 
 class ContributionExporterTests(unittest.TestCase):

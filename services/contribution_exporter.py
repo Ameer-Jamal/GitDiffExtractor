@@ -5,7 +5,7 @@ import io
 import json
 from typing import Iterable
 
-from contribution_models import ContributionHistoryResult, ContributionRecord
+from models.contribution_models import ContributionHistoryResult, ContributionRecord
 
 
 class ContributionExportService:

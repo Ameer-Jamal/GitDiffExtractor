@@ -34,12 +34,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QUrl
 
 from ConfigManager import ConfigManager
-from TaskRunner import TaskRunner
-from contribution_exporter import ContributionExportService
-from contribution_history_service import CancelToken, ContributionHistoryService
-from contribution_models import ContributionHistoryQuery, ContributionHistoryResult, ContributionRecord, RepositoryRef
-from provider_api import build_provider_client
-from scope_manager import ScopeManager
+from ui.TaskRunner import TaskRunner
+from services.contribution_exporter import ContributionExportService
+from services.contribution_history_service import CancelToken, ContributionHistoryService
+from models.contribution_models import ContributionHistoryQuery, ContributionHistoryResult, ContributionRecord, RepositoryRef
+from services.provider_api import build_provider_client
+from services.scope_manager import ScopeManager
 
 
 class RepositorySelectionDialog(QDialog):

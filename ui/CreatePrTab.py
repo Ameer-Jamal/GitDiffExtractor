@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLineEdit, QPushButton, QLabel, QMessageBox
 )
-from FilterableBranchSelector import FilterableBranchSelector
+from ui.FilterableBranchSelector import FilterableBranchSelector
 
 
 class CreatePRTab(QWidget):

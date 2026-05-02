@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
 )
 
-from RepositoryProvider import RepositoryProvider
+from services.RepositoryProvider import RepositoryProvider
 
 
 class SettingsTab(QWidget):

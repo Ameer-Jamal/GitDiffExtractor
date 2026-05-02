@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Optional
 
 from ConfigManager import ConfigManager
-from contribution_models import ContributionScope, RepositoryRef
-from provider_api import ProviderClient, build_provider_client
+from models.contribution_models import ContributionScope, RepositoryRef
+from services.provider_api import ProviderClient, build_provider_client
 
 
 class ScopeManager:
