@@ -8,8 +8,8 @@ from ConfigManager import ConfigManager
 
 
 class TestConfigManager(ConfigManager):
-    ORG_NAME = "GitDiffExtractorTests"
-    APP_NAME = "GitDiffExtractorTests"
+    ORG_NAME = "RepoLensTests"
+    APP_NAME = "RepoLensTests"
 
 
 class ConfigManagerTests(unittest.TestCase):

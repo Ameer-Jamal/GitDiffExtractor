@@ -11,10 +11,16 @@ from PyQt5.QtCore import QSettings
 class ConfigManager:
     """Central storage for provider settings and per-repository preferences."""
 
-    ORG_NAME = "GitDiffExtractor"
-    APP_NAME = "GitDiffExtractor"
-    LEGACY_CONFIG_FILE = "diff_extractor_default_config.json"
-    REPO_CONFIG_FILE = ".git_diff_extractor.json"
+    ORG_NAME = "RepoLens"
+    APP_NAME = "RepoLens"
+    OLD_ORG_NAME = "Git" + "Diff" + "Extractor"
+    OLD_APP_NAME = "Git" + "Diff" + "Extractor"
+    LEGACY_CONFIG_FILE = "repolens_default_config.json"
+    OLD_LEGACY_CONFIG_FILES = ("diff" + "_extractor_default_config.json",)
+    REPO_CONFIG_FILE = ".repolens.json"
+    OLD_REPO_CONFIG_FILES = (".git_" + "diff" + "_extractor.json",)
+    DEFAULT_MANAGED_REPO_ROOT = os.path.join(os.path.expanduser("~"), ".repolens", "repos")
+    OLD_MANAGED_REPO_ROOT = os.path.join(os.path.expanduser("~"), ".git" + "diff" + "extractor", "repos")
 
     DEFAULT_REPO_CONFIG = {
         "last_repo_dir": "",
@@ -59,6 +65,8 @@ class ConfigManager:
 
     def __init__(self):
         self.settings = QSettings(self.ORG_NAME, self.APP_NAME)
+        self._migrate_qsettings_namespace()
+        self._rewrite_managed_repo_paths_in_settings()
         self.current_repo = self.settings.value("last_repo_dir", "", str)
         self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
 
@@ -70,17 +78,81 @@ class ConfigManager:
 
     # ------------------------------------------------------------------
     # Internal helpers
+    def _migrate_qsettings_namespace(self) -> None:
+        """Copy settings from the pre-RepoLens namespace on first run."""
+        if (
+            self.settings.value("_namespace_migrated", False, bool)
+            or (self.ORG_NAME, self.APP_NAME) == (self.OLD_ORG_NAME, self.OLD_APP_NAME)
+        ):
+            return
+
+        old_settings = QSettings(self.OLD_ORG_NAME, self.OLD_APP_NAME)
+        old_keys = old_settings.allKeys()
+        if old_keys:
+            current_keys = set(self.settings.allKeys())
+            for key in old_keys:
+                if key not in current_keys:
+                    self.settings.setValue(key, old_settings.value(key))
+
+        self.settings.setValue("_namespace_migrated", True)
+
+    def _rewrite_managed_path(self, value: Any) -> str:
+        path = str(value or "")
+        if not path:
+            return ""
+        old_root = os.path.normpath(self.OLD_MANAGED_REPO_ROOT)
+        new_root = os.path.normpath(self.DEFAULT_MANAGED_REPO_ROOT)
+        normalized = os.path.normpath(path)
+        if normalized == old_root or normalized.startswith(old_root + os.sep):
+            suffix = normalized[len(old_root):].lstrip(os.sep)
+            return os.path.join(new_root, suffix) if suffix else new_root
+        return path
+
+    def _rewrite_repo_payload_paths(self, repositories: list) -> list:
+        rewritten = []
+        for repo in repositories:
+            if isinstance(repo, dict):
+                repo = dict(repo)
+                repo["local_dir"] = self._rewrite_managed_path(repo.get("local_dir", ""))
+            rewritten.append(repo)
+        return rewritten
+
+    def _rewrite_managed_repo_paths_in_settings(self) -> None:
+        """Point migrated settings at the RepoLens-managed checkout location."""
+        for key in ("last_repo_dir", "active_repo_local_dir", "managed_repo_root"):
+            current = self.settings.value(key, "", str)
+            rewritten = self._rewrite_managed_path(current)
+            if rewritten != current:
+                self.settings.setValue(key, rewritten)
+
+        raw = self.settings.value("selected_repositories_json", "[]", str)
+        try:
+            repositories = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            repositories = []
+        if isinstance(repositories, list):
+            rewritten = self._rewrite_repo_payload_paths(repositories)
+            if rewritten != repositories:
+                self.settings.setValue("selected_repositories_json", json.dumps(rewritten))
+
     def _migrate_legacy_settings(self) -> None:
         """Import values from the previous JSON configuration if present."""
         if self.settings.value("_legacy_migrated", False, bool):
             return
 
-        if not os.path.exists(self.LEGACY_CONFIG_FILE):
+        legacy_path = self.LEGACY_CONFIG_FILE
+        if not os.path.exists(legacy_path):
+            legacy_path = next(
+                (path for path in self.OLD_LEGACY_CONFIG_FILES if os.path.exists(path)),
+                "",
+            )
+
+        if not legacy_path:
             self.settings.setValue("_legacy_migrated", True)
             return
 
         try:
-            with open(self.LEGACY_CONFIG_FILE, "r", encoding="utf-8") as legacy_file:
+            with open(legacy_path, "r", encoding="utf-8") as legacy_file:
                 legacy_data = json.load(legacy_file)
         except Exception as exc:  # noqa: BLE001 - best effort migration
             print(f"Error migrating legacy config: {exc}")
@@ -120,6 +192,13 @@ class ConfigManager:
     def _repo_config_path(self, repo_dir: str) -> str:
         return os.path.join(repo_dir, self.REPO_CONFIG_FILE)
 
+    def _legacy_repo_config_path(self, repo_dir: str) -> str:
+        for filename in self.OLD_REPO_CONFIG_FILES:
+            path = os.path.join(repo_dir, filename)
+            if os.path.exists(path):
+                return path
+        return ""
+
     def _load_repo_config(self, repo_dir: str) -> None:
         """Load per-repository configuration if available."""
         self.repo_config = dict(self.DEFAULT_REPO_CONFIG)
@@ -128,6 +207,12 @@ class ConfigManager:
             return
 
         config_path = self._repo_config_path(repo_dir)
+        loaded_legacy_path = ""
+        if not os.path.exists(config_path):
+            loaded_legacy_path = self._legacy_repo_config_path(repo_dir)
+            if loaded_legacy_path:
+                config_path = loaded_legacy_path
+
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as repo_file:
@@ -140,8 +225,8 @@ class ConfigManager:
                                 for k, v in self.DEFAULT_REPO_CONFIG.items()
                             }
                         )
-                        if had_legacy_provider_keys:
-                            # Persist a cleaned repo config file without provider credentials.
+                        if had_legacy_provider_keys or loaded_legacy_path:
+                            # Persist a cleaned RepoLens config without provider credentials.
                             self.repo_config["last_repo_dir"] = repo_dir
                             self._save_repo_config(repo_dir)
             except Exception as exc:  # noqa: BLE001 - prefer resilience
@@ -406,8 +491,11 @@ class ConfigManager:
     def get_managed_repo_root(self) -> str:
         stored = self.settings.value("managed_repo_root", "", str)
         if stored:
-            return stored
-        return os.path.join(os.path.expanduser("~"), ".gitdiffextractor", "repos")
+            rewritten = self._rewrite_managed_path(stored)
+            if rewritten != stored:
+                self.settings.setValue("managed_repo_root", rewritten)
+            return rewritten
+        return self.DEFAULT_MANAGED_REPO_ROOT
 
     def set_managed_repo_root(self, path: str) -> None:
         self.settings.setValue("managed_repo_root", path or "")

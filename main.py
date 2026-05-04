@@ -30,7 +30,7 @@ DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'etqdev').st
 INPUT_ERROR = "Input Error"
 
 
-class GitDiffExtractor(QWidget):
+class RepoLens(QWidget):
 
     def __init__(self):
         super().__init__()
@@ -73,7 +73,7 @@ class GitDiffExtractor(QWidget):
         # Initialize the QTabWidget
         self.tabs = QTabWidget()
 
-        # Create the PR Diff Extractor UI and Branch Commit Viewer UI as separate widgets
+        # Create the PR lens and branch commit viewer UI as separate widgets.
         self.initUI()
 
         # Build tabs
@@ -87,7 +87,7 @@ class GitDiffExtractor(QWidget):
         self.settings_tab.activeRepositoriesChanged.connect(self._on_active_repositories_selected)
 
         # Add both tabs to the QTabWidget
-        self.tabs.addTab(self.pr_tab_widget, "Diff Extractor")  # Default tab
+        self.tabs.addTab(self.pr_tab_widget, "PR Lens")  # Default tab
         self.tabs.addTab(self.branch_viewer, "Branch Commit Viewer")
         self.tabs.addTab(self.create_pr_tab, "Create PR")
         self.tabs.addTab(self.contribution_history_tab, "Contribution History")
@@ -104,7 +104,7 @@ class GitDiffExtractor(QWidget):
         self._initialize_active_repository()
 
     def initUI(self):
-        self.setWindowTitle('Git Diff Extractor')
+        self.setWindowTitle('RepoLens')
         self.setGeometry(500, 500, 800, 900)
 
     def prExtractDiffWidget(self):
@@ -1241,6 +1241,6 @@ class GitDiffExtractor(QWidget):
 
 if __name__ == '__main__':
     app = QApplication([])
-    extractor = GitDiffExtractor()
-    extractor.show()
+    repo_lens = RepoLens()
+    repo_lens.show()
     app.exec_()

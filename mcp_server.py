@@ -38,7 +38,7 @@ def _clamp_diff_limit(value: int) -> int:
     return min(value, DEFAULT_DIFF_CHAR_LIMIT)
 
 
-class GitDiffMCPBackend:
+class RepoLensMCPBackend:
     def __init__(self, config: HeadlessConfig | None = None):
         self.config = config or HeadlessConfig()
         self.provider = build_provider_client(self.config)
@@ -482,12 +482,12 @@ class GitDiffMCPBackend:
         return text[:limit], True
 
 
-def create_mcp_server(backend: GitDiffMCPBackend | None = None):
+def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     if FastMCP is None:
         raise ImportError("The 'mcp' package is required to run the MCP server.")
 
-    backend = backend or GitDiffMCPBackend()
-    app = FastMCP("GitDiffExtractor MCP", json_response=True)
+    backend = backend or RepoLensMCPBackend()
+    app = FastMCP("RepoLens MCP", json_response=True)
 
     @app.tool()
     def get_active_context() -> dict[str, Any]:
@@ -697,7 +697,7 @@ def build_headless_config(cli_args: argparse.Namespace | None = None, env: dict[
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="GitDiffExtractor MCP server")
+    parser = argparse.ArgumentParser(description="RepoLens MCP server")
     parser.add_argument("--provider")
     parser.add_argument("--bitbucket-username")
     parser.add_argument("--bitbucket-app-password")
@@ -721,7 +721,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-    app = create_mcp_server(GitDiffMCPBackend(build_headless_config(args)))
+    app = create_mcp_server(RepoLensMCPBackend(build_headless_config(args)))
     app.run(transport="stdio")
 
 

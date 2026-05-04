@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import MagicMock
 
-from mcp_server import GitDiffMCPBackend
+from mcp_server import RepoLensMCPBackend
 
 
 class MCPBackendTicketDiffTests(unittest.TestCase):
     def test_get_ticket_diffs_groups_multiple_tickets_and_truncates_per_pr(self):
-        backend = object.__new__(GitDiffMCPBackend)
+        backend = object.__new__(RepoLensMCPBackend)
         backend.config = MagicMock()
         backend.pr_service = MagicMock()
         backend.diff_service = MagicMock()
@@ -54,7 +54,7 @@ class MCPBackendTicketDiffTests(unittest.TestCase):
         self.assertEqual(payload["tickets"][1]["count"], 0)
 
     def test_get_ticket_diffs_requires_json_array(self):
-        backend = object.__new__(GitDiffMCPBackend)
+        backend = object.__new__(RepoLensMCPBackend)
         with self.assertRaisesRegex(ValueError, "JSON array"):
             backend.get_ticket_diffs(tickets_json='"RU-25463"')
 

@@ -8,8 +8,8 @@ from headless_config import HeadlessConfig
 
 
 class TestConfigManager(ConfigManager):
-    ORG_NAME = "GitDiffExtractorHeadlessTests"
-    APP_NAME = "GitDiffExtractorHeadlessTests"
+    ORG_NAME = "RepoLensHeadlessTests"
+    APP_NAME = "RepoLensHeadlessTests"
 
 
 class HeadlessConfigTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class HeadlessConfigTests(unittest.TestCase):
     def test_selected_repositories_json_override_roundtrip(self):
         config = HeadlessConfig.from_sources(
             base_config=TestConfigManager(),
-            env={"GITDIFFEXTRACTOR_SELECTED_REPOSITORIES_JSON": '[{"owner":"openai","slug":"demo"}]'},
+            env={"REPOLENS_SELECTED_REPOSITORIES_JSON": '[{"owner":"openai","slug":"demo"}]'},
             cli_overrides={},
         )
         self.assertEqual(config.get_selected_repositories()[0]["owner"], "openai")
