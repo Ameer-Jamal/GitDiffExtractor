@@ -81,12 +81,13 @@ class RepoLensMCPBackend:
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         filter_mode: str = "open",
         search_text: str = "",
         developer: str = "",
         next_cursor: str = "",
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
         records, cursor = self.pr_service.list_pull_requests_for_repo(
             repo,
             filter_mode=filter_mode,
@@ -244,10 +245,11 @@ class RepoLensMCPBackend:
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
         pr = self.pr_service.get_pull_request(repo, pr_id)
         repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
         result = self.diff_service.generate_pr_diff(pr, repo_dir)
@@ -273,10 +275,11 @@ class RepoLensMCPBackend:
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
         repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
         result = self.diff_service.generate_commit_diff(repo_dir, commit_hash)
         diff_text, truncated = self._truncate_text(result.diff_text, _clamp_diff_limit(max_chars))
@@ -354,19 +357,25 @@ class RepoLensMCPBackend:
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         limit: int = 50,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
         repo_ref = RepositoryRef.from_dict(repo)
         return {
             "repository": self._repo_identity(repo),
             "candidates": self.provider.list_developer_candidates(repo_ref, limit=limit),
         }
 
-    def resolve_repository(self, *, provider: str = "", workspace: str = "", slug: str = "") -> dict:
+    def resolve_repository(self, *, provider: str = "", workspace: str = "", slug: str = "", scope: str = "") -> dict:
         desired_provider = (provider or self.config.get_provider() or "").lower()
         desired_workspace = (workspace or "").strip().lower()
         desired_slug = (slug or "").strip().lower()
+        specific_repo = self._specific_repo_from_scope(scope)
+        if specific_repo:
+            specific_workspace, specific_slug = self._split_repo_ref(specific_repo)
+            desired_workspace = desired_workspace or specific_workspace
+            desired_slug = desired_slug or specific_slug
 
         candidates = []
         active = self.config.get_active_repository()
@@ -402,7 +411,7 @@ class RepoLensMCPBackend:
                 continue
             if desired_workspace and (repo.get("owner") or "").lower() != desired_workspace:
                 continue
-            if desired_slug and (repo.get("slug") or repo.get("name") or "").lower() != desired_slug:
+            if desired_slug and not self._repository_name_matches(repo, desired_slug):
                 continue
             return repo
 
@@ -420,6 +429,9 @@ class RepoLensMCPBackend:
             return [self.resolve_repository(provider=provider, workspace=workspace, slug=slug)]
 
         normalized_scope = (scope or "active").strip().lower()
+        if self._specific_repo_from_scope(scope):
+            return [self.resolve_repository(provider=provider, scope=scope)]
+
         if normalized_scope == "selected":
             repositories = self.config.get_selected_repositories()
             if repositories:
@@ -429,6 +441,35 @@ class RepoLensMCPBackend:
             return self.list_repositories(force_refresh=False)
 
         return [self.resolve_repository(provider=provider)]
+
+    @staticmethod
+    def _specific_repo_from_scope(scope: str) -> str:
+        text = (scope or "").strip()
+        if not text.lower().startswith("specific:"):
+            return ""
+        return text.split(":", 1)[1].strip()
+
+    @staticmethod
+    def _split_repo_ref(repo_ref: str) -> tuple[str, str]:
+        value = (repo_ref or "").strip().strip("/")
+        if "/" not in value:
+            return "", value.lower()
+        owner, slug = value.rsplit("/", 1)
+        return owner.strip().lower(), slug.strip().lower()
+
+    @classmethod
+    def _repository_name_matches(cls, repo: dict, value: str) -> bool:
+        expected = (value or "").strip().lower()
+        slug = (repo.get("slug") or repo.get("name") or "").lower()
+        name = (repo.get("name") or "").lower()
+        return expected in {slug, name} or cls._normalized_repo_name(expected) in {
+            cls._normalized_repo_name(slug),
+            cls._normalized_repo_name(name),
+        }
+
+    @staticmethod
+    def _normalized_repo_name(value: str) -> str:
+        return "".join(ch for ch in (value or "").lower() if ch.isalnum())
 
     @staticmethod
     def _parse_tickets_json(value: str) -> list[str]:
@@ -509,6 +550,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         filter_mode: str = "open",
         search_text: str = "",
         developer: str = "",
@@ -519,6 +561,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             provider=provider,
             workspace=workspace,
             slug=slug,
+            scope=scope,
             filter_mode=filter_mode,
             search_text=search_text,
             developer=developer,
@@ -590,6 +633,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
@@ -599,6 +643,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             provider=provider,
             workspace=workspace,
             slug=slug,
+            scope=scope,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
         )
@@ -609,6 +654,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
@@ -618,6 +664,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             provider=provider,
             workspace=workspace,
             slug=slug,
+            scope=scope,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
         )
@@ -656,6 +703,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         provider: str = "",
         workspace: str = "",
         slug: str = "",
+        scope: str = "",
         limit: int = 50,
     ) -> dict[str, Any]:
         """List likely developer identities for a repository."""
@@ -663,6 +711,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             provider=provider,
             workspace=workspace,
             slug=slug,
+            scope=scope,
             limit=limit,
         )
 

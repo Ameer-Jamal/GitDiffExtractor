@@ -185,6 +185,21 @@ Ticket lookup prompt:
 Use the RepoLens MCP server to find pull requests for ticket RU-25463. Search selected repositories. If there are multiple PRs, list each PR id, title, repo, state, source branch, destination branch, and link.
 ```
 
+Specific repository prompt:
+
+```text
+Use the RepoLens MCP server to check open PRs in pdf-repo, even if it is not the active or selected repository.
+
+Call list_pull_requests with:
+scope="specific:pdf-repo"
+filter_mode="open"
+
+Return PR id, title, state, source branch, destination branch, author, and link.
+```
+
+For an explicit owner/workspace, use `scope="specific:WORKSPACE_OR_OWNER/pdf-capturing-service-repo"`.
+RepoLens treats `specific:` as an override selector: it searches active, selected, and discovered repositories for a matching slug, name, or `owner/slug`, then uses that matched repository.
+
 Multi-ticket QA impact prompt:
 
 ```text

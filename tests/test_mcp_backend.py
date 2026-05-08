@@ -58,6 +58,60 @@ class MCPBackendTicketDiffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON array"):
             backend.get_ticket_diffs(tickets_json='"RU-25463"')
 
+    def test_specific_scope_uses_discovered_repo_match(self):
+        backend = object.__new__(RepoLensMCPBackend)
+        backend.config = MagicMock()
+        backend.config.get_provider.return_value = "bitbucket"
+        backend.config.get_bitbucket_workspace.return_value = "etqdev"
+        backend.config.get_active_repository.return_value = {}
+        backend.config.get_selected_repositories.return_value = []
+        backend.list_repositories = MagicMock(
+            return_value=[
+                {
+                    "provider": "bitbucket",
+                    "id": "repo-123",
+                    "owner": "etqdev",
+                    "slug": "pdf-capturing-service-repo",
+                    "name": "PDF Capturing Service Repo",
+                    "clone_url": "https://example.test/custom.git",
+                }
+            ]
+        )
+
+        repos = backend._ticket_search_repositories(scope="specific:pdf-capturing-service-repo")
+
+        self.assertEqual(len(repos), 1)
+        self.assertEqual(repos[0]["provider"], "bitbucket")
+        self.assertEqual(repos[0]["id"], "repo-123")
+        self.assertEqual(repos[0]["owner"], "etqdev")
+        self.assertEqual(repos[0]["slug"], "pdf-capturing-service-repo")
+        self.assertEqual(repos[0]["clone_url"], "https://example.test/custom.git")
+
+    def test_specific_scope_accepts_owner_and_repo(self):
+        backend = object.__new__(RepoLensMCPBackend)
+        backend.config = MagicMock()
+        backend.config.get_provider.return_value = "github"
+        backend.config.get_github_owner.return_value = ""
+        backend.config.get_active_repository.return_value = {}
+        backend.config.get_selected_repositories.return_value = []
+        backend.list_repositories = MagicMock(
+            return_value=[
+                {
+                    "provider": "github",
+                    "owner": "openai",
+                    "slug": "demo",
+                    "clone_url": "https://github.com/openai/demo.git",
+                }
+            ]
+        )
+
+        repo = backend.resolve_repository(scope="specific:OpenAI/demo")
+
+        self.assertEqual(repo["provider"], "github")
+        self.assertEqual(repo["owner"], "openai")
+        self.assertEqual(repo["slug"], "demo")
+        self.assertEqual(repo["clone_url"], "https://github.com/openai/demo.git")
+
 
 if __name__ == "__main__":
     unittest.main()
