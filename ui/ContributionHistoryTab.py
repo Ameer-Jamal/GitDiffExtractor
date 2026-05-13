@@ -42,66 +42,53 @@ from services.provider_api import build_provider_client
 from services.scope_manager import ScopeManager
 
 
-class RepositorySelectionDialog(QDialog):
-    def __init__(self, repositories: list[RepositoryRef], selected: list[RepositoryRef], parent=None):
+class CheckableComboBox(QComboBox):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Selected Repositories")
-        self.resize(600, 500)
-        self._repositories = repositories
-        self._selected_keys = {repo.key for repo in selected}
+        self.view().pressed.connect(self.handle_item_pressed)
+        self._changed = False
 
-        layout = QVBoxLayout(self)
+    def handle_item_pressed(self, index):
+        item = self.model().itemFromIndex(index)
+        if item.checkState() == Qt.Checked:
+            item.setCheckState(Qt.Unchecked)
+        else:
+            item.setCheckState(Qt.Checked)
+        self._changed = True
 
-        self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("Search repositories")
-        self.search_input.textChanged.connect(self._apply_filter)
-        layout.addWidget(self.search_input)
+    def hidePopup(self):
+        if self._changed:
+            self._changed = False
+            return
+        super().hidePopup()
 
-        self.list_widget = QListWidget(self)
-        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
-        layout.addWidget(self.list_widget)
-
-        button_row = QHBoxLayout()
-        self.clear_button = QPushButton("Clear")
-        self.clear_button.clicked.connect(self._clear_checks)
-        button_row.addWidget(self.clear_button)
-        button_row.addStretch()
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_row.addWidget(cancel_button)
-        save_button = QPushButton("Save")
-        save_button.clicked.connect(self.accept)
-        button_row.addWidget(save_button)
-        layout.addLayout(button_row)
-
-        self._populate()
-
-    def _populate(self):
-        self.list_widget.clear()
-        for repo in self._repositories:
-            item = QListWidgetItem(repo.display_name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if repo.key in self._selected_keys else Qt.Unchecked)
-            item.setData(Qt.UserRole, repo)
-            self.list_widget.addItem(item)
-
-    def _clear_checks(self):
-        for index in range(self.list_widget.count()):
-            self.list_widget.item(index).setCheckState(Qt.Unchecked)
-
-    def _apply_filter(self):
-        query = self.search_input.text().strip().lower()
-        for index in range(self.list_widget.count()):
-            item = self.list_widget.item(index)
-            item.setHidden(query not in item.text().lower())
-
-    def selected_repositories(self) -> list[RepositoryRef]:
-        selected: list[RepositoryRef] = []
-        for index in range(self.list_widget.count()):
-            item = self.list_widget.item(index)
+    def checked_items(self):
+        checked = []
+        for i in range(self.count()):
+            item = self.model().item(i)
             if item.checkState() == Qt.Checked:
-                selected.append(item.data(Qt.UserRole))
-        return selected
+                checked.append(item.data(Qt.UserRole))
+        return checked
+
+    def set_checked_items(self, keys):
+        keys_set = set(keys)
+        for i in range(self.count()):
+            item = self.model().item(i)
+            repo = item.data(Qt.UserRole)
+            if repo and repo.key in keys_set:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+        self.update_display_text()
+
+    def update_display_text(self):
+        checked = self.checked_items()
+        if not checked:
+            self.setEditText("Select repositories...")
+        elif len(checked) == 1:
+            self.setEditText(checked[0].display_name)
+        else:
+            self.setEditText(f"{len(checked)} repositories selected")
 
 
 class ContributionDetailDialog(QDialog):
@@ -193,7 +180,6 @@ class ContributionHistoryTab(QWidget):
         self.cancel_token: Optional[CancelToken] = None
         self.current_result: Optional[ContributionHistoryResult] = None
         self.current_accessible_repositories: list[RepositoryRef] = []
-        self.custom_selected_repositories: list[RepositoryRef] = []
         self._defaults_initialized = False
         self._query_started_at = 0.0
         self._busy_status_prefix = "Running…"
@@ -273,24 +259,20 @@ class ContributionHistoryTab(QWidget):
         filter_layout.addWidget(self.end_date_edit, 1, 3)
 
         self.scope_combo = QComboBox(self)
-        self.scope_combo.addItem("Current repo", "current_repo")
         self.scope_combo.addItem("Selected repos (Settings)", "selected_repos")
-        self.scope_combo.addItem("Custom repos (This tab)", "custom_repos")
+        self.scope_combo.addItem("Custom repo selection", "custom_repos")
         self.scope_combo.addItem("All repos", "all_repos")
         self.scope_combo.currentIndexChanged.connect(self._refresh_developer_suggestions)
         self.scope_combo.currentIndexChanged.connect(self._on_scope_mode_changed)
         filter_layout.addWidget(QLabel("Scope"), 2, 0)
         filter_layout.addWidget(self.scope_combo, 2, 1)
 
-        scope_button_row = QHBoxLayout()
-        self.edit_scope_button = QPushButton("Edit selected repos")
-        self.edit_scope_button.clicked.connect(self._edit_selected_repositories)
-        scope_button_row.addWidget(self.edit_scope_button)
-        self.refresh_scope_button = QPushButton("Refresh repo list")
-        self.refresh_scope_button.clicked.connect(lambda: self._load_scope_repositories(force_refresh=True))
-        scope_button_row.addWidget(self.refresh_scope_button)
-        scope_button_row.addStretch()
-        filter_layout.addLayout(scope_button_row, 2, 2, 1, 2)
+        self.custom_repo_combo = CheckableComboBox(self)
+        self.custom_repo_combo.setEditable(True)
+        self.custom_repo_combo.lineEdit().setReadOnly(True)
+        self.custom_repo_combo.setVisible(False)
+        self.custom_repo_combo.view().pressed.connect(lambda: QTimer.singleShot(0, self._on_custom_repo_changed))
+        filter_layout.addWidget(self.custom_repo_combo, 2, 2, 1, 2)
 
         self.contribution_type_combo = QComboBox(self)
         self.contribution_type_combo.addItem("Merged PRs only", "merged_prs")
@@ -301,6 +283,7 @@ class ContributionHistoryTab(QWidget):
 
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("Search titles, commit messages, or ticket keyword")
+        self.search_input.textChanged.connect(self._rerender_current_result)
         filter_layout.addWidget(QLabel("Search"), 3, 2)
         filter_layout.addWidget(self.search_input, 3, 3)
 
@@ -308,12 +291,17 @@ class ContributionHistoryTab(QWidget):
         self.advanced_toggle_button.setCheckable(True)
         self.advanced_toggle_button.toggled.connect(self._toggle_advanced_filters)
         filter_layout.addWidget(self.advanced_toggle_button, 4, 0, 1, 4)
+        self.query_hint_label = QLabel(
+            "Tip: Use scope + contribution type first, then add branch/search filters only if needed."
+        )
+        self.query_hint_label.setWordWrap(True)
+        filter_layout.addWidget(self.query_hint_label, 5, 0, 1, 4)
 
         self.branch_filter_label = QLabel("Branch filter")
         self.branch_filter_input = QLineEdit(self)
-        self.branch_filter_input.setPlaceholderText("Optional branch filter")
-        filter_layout.addWidget(self.branch_filter_label, 5, 0)
-        filter_layout.addWidget(self.branch_filter_input, 5, 1)
+        self.branch_filter_input.setPlaceholderText("Optional branch name (source or destination)")
+        filter_layout.addWidget(self.branch_filter_label, 6, 0)
+        filter_layout.addWidget(self.branch_filter_input, 6, 1)
 
         self.group_by_label = QLabel("Group by")
         self.group_by_combo = QComboBox(self)
@@ -325,8 +313,8 @@ class ContributionHistoryTab(QWidget):
         self.group_by_combo.addItem("Contribution type", "type")
         self.group_by_combo.addItem("Ticket ID", "ticket")
         self.group_by_combo.currentIndexChanged.connect(self._rerender_current_result)
-        filter_layout.addWidget(self.group_by_label, 5, 2)
-        filter_layout.addWidget(self.group_by_combo, 5, 3)
+        filter_layout.addWidget(self.group_by_label, 6, 2)
+        filter_layout.addWidget(self.group_by_combo, 6, 3)
 
         toggle_row = QHBoxLayout()
         self.exclude_bots_checkbox = QCheckBox("Exclude bots/system users")
@@ -342,10 +330,30 @@ class ContributionHistoryTab(QWidget):
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         toggle_row.addWidget(self.view_mode_combo)
         toggle_row.addStretch()
-        filter_layout.addLayout(toggle_row, 6, 0, 1, 4)
+        filter_layout.addLayout(toggle_row, 7, 0, 1, 4)
 
         action_row = QHBoxLayout()
         self.run_button = QPushButton("Run Query")
+        self.run_button.setStyleSheet(
+            "QPushButton {"
+            "background-color: #0b63ce;"
+            "color: white;"
+            "font-weight: 700;"
+            "border: 1px solid #084b9e;"
+            "border-radius: 6px;"
+            "padding: 6px 12px;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: #0958b8;"
+            "}"
+            "QPushButton:pressed {"
+            "background-color: #074894;"
+            "}"
+            "QPushButton:disabled {"
+            "background-color: #7aa8df;"
+            "color: #f3f7ff;"
+            "}"
+        )
         self.run_button.clicked.connect(self.run_query)
         action_row.addWidget(self.run_button)
         self.cancel_button = QPushButton("Cancel")
@@ -353,20 +361,7 @@ class ContributionHistoryTab(QWidget):
         self.cancel_button.setEnabled(False)
         action_row.addWidget(self.cancel_button)
         action_row.addStretch()
-        self.export_format_combo = QComboBox(self)
-        self.export_format_combo.addItem("CSV", "csv")
-        self.export_format_combo.addItem("Markdown", "md")
-        self.export_format_combo.addItem("JSON", "json")
-        action_row.addWidget(self.export_format_combo)
-        self.export_mode_combo = QComboBox(self)
-        self.export_mode_combo.addItem("Raw records", "raw")
-        self.export_mode_combo.addItem("Titles/messages only", "titles")
-        self.export_mode_combo.addItem("Grouped summary", "grouped")
-        action_row.addWidget(self.export_mode_combo)
-        self.export_button = QPushButton("Export")
-        self.export_button.clicked.connect(self.export_results)
-        action_row.addWidget(self.export_button)
-        filter_layout.addLayout(action_row, 7, 0, 1, 4)
+        filter_layout.addLayout(action_row, 8, 0, 1, 4)
 
         root.addWidget(filter_group)
 
@@ -395,8 +390,50 @@ class ContributionHistoryTab(QWidget):
         summary_layout.addWidget(self.ticket_prefix_label, 4, 1, 1, 3)
         root.addWidget(summary_group)
 
-        self.status_label = QLabel("Ready")
-        root.addWidget(self.status_label)
+        # Status and local table controls
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Status: Ready. Configure filters and click 'Run Query'.")
+        status_row.addWidget(self.status_label)
+        status_row.addStretch()
+        root.addLayout(status_row)
+
+        table_controls = QHBoxLayout()
+        table_controls.addWidget(QLabel("Filter Results by Repository:"))
+        self.repo_filter_combo = QComboBox(self)
+        self.repo_filter_combo.addItem("All repositories", "")
+        self.repo_filter_combo.currentIndexChanged.connect(self._rerender_current_result)
+        table_controls.addWidget(self.repo_filter_combo)
+        table_controls.addStretch()
+        root.addLayout(table_controls)
+
+        # Export Settings Group
+        export_group = QGroupBox("Export Settings")
+        export_layout = QHBoxLayout(export_group)
+        export_layout.setContentsMargins(10, 10, 10, 10)
+        
+        export_layout.addWidget(QLabel("Export Format:"))
+        self.export_format_combo = QComboBox(self)
+        self.export_format_combo.addItem("CSV", "csv")
+        self.export_format_combo.addItem("Markdown", "md")
+        self.export_format_combo.addItem("JSON", "json")
+        self.export_format_combo.setToolTip("Choose file format for export.")
+        export_layout.addWidget(self.export_format_combo)
+        
+        export_layout.addSpacing(10)
+        export_layout.addWidget(QLabel("Content Mode:"))
+        self.export_mode_combo = QComboBox(self)
+        self.export_mode_combo.addItem("Raw records", "raw")
+        self.export_mode_combo.addItem("Titles/messages only", "titles")
+        self.export_mode_combo.addItem("Grouped summary", "grouped")
+        self.export_mode_combo.setToolTip("Choose whether export contains full details or a compact view.")
+        export_layout.addWidget(self.export_mode_combo)
+        
+        export_layout.addStretch()
+        self.export_button = QPushButton("Export Results")
+        self.export_button.clicked.connect(self.export_results)
+        export_layout.addWidget(self.export_button)
+        
+        root.addWidget(export_group)
 
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 1)
@@ -413,6 +450,7 @@ class ContributionHistoryTab(QWidget):
         self.results_table.cellDoubleClicked.connect(self._show_detail_for_row)
         header = self.results_table.horizontalHeader()
         header.setStretchLastSection(True)
+        self.results_table.setAlternatingRowColors(True)
         root.addWidget(self.results_table, 1)
         self._toggle_advanced_filters(False)
         self._on_scope_mode_changed()
@@ -437,12 +475,14 @@ class ContributionHistoryTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Custom Scope Empty",
-                "No custom repositories selected.\nUse 'Edit scope repositories' to choose repositories.",
+                "No custom repository selected.\nPlease select a repository from the dropdown.",
             )
             return
         self.cancel_token = CancelToken()
-        self._set_busy(True, "Running contribution history query this may take a while depending on the amount of "
-                             "history please wait…")
+        self._set_busy(
+            True,
+            "Running contribution query. Large scopes may take longer; you can cancel anytime.",
+        )
         self.status_label.setText("Starting query…")
 
         def task():
@@ -495,7 +535,7 @@ class ContributionHistoryTab(QWidget):
     def cancel_query(self):
         if self.cancel_token:
             self.cancel_token.cancel()
-            self.status_label.setText("Cancelling after the current request completes…")
+            self.status_label.setText("Cancellation requested. Finishing current provider request…")
             self.cancel_button.setEnabled(False)
 
     def export_results(self):
@@ -535,7 +575,13 @@ class ContributionHistoryTab(QWidget):
         with open(filename, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
 
-        QMessageBox.information(self, "Export Complete", f"Saved export to:\n{filename}")
+        mode_label = self.export_mode_combo.currentText()
+        format_label = self.export_format_combo.currentText()
+        QMessageBox.information(
+            self,
+            "Export Complete",
+            f"Saved {mode_label} as {format_label}:\n{filename}",
+        )
 
     def _build_query(self) -> ContributionHistoryQuery:
         start_date = self.start_date_edit.date().toPyDate()
@@ -552,8 +598,13 @@ class ContributionHistoryTab(QWidget):
         scope_repositories = None
         scope_label_override = ""
         if scope_type == "custom_repos":
-            scope_repositories = tuple(self.custom_selected_repositories)
-            scope_label_override = f"Custom repositories ({len(scope_repositories)})"
+            selected_repos = self.custom_repo_combo.checked_items()
+            if selected_repos:
+                scope_repositories = tuple(selected_repos)
+                scope_label_override = f"Custom ({len(scope_repositories)} repos)"
+            else:
+                scope_repositories = ()
+                scope_label_override = "Custom: No repository selected"
         return ContributionHistoryQuery(
             developer=", ".join(developers),
             start_date=start_date,
@@ -588,6 +639,22 @@ class ContributionHistoryTab(QWidget):
             self.range_label.setText("All time")
         self.top_repos_label.setText(", ".join(result.top_repositories) or "—")
         self.ticket_prefix_label.setText(", ".join(result.ticket_prefixes) or "—")
+
+        # Update repo filter combo
+        current_repo_filter = self.repo_filter_combo.currentData()
+        block = self.repo_filter_combo.blockSignals(True)
+        self.repo_filter_combo.clear()
+        self.repo_filter_combo.addItem("All repositories", "")
+        for repo_name in sorted(result.active_repositories):
+            self.repo_filter_combo.addItem(repo_name, repo_name)
+        
+        index = self.repo_filter_combo.findData(current_repo_filter)
+        if index >= 0:
+            self.repo_filter_combo.setCurrentIndex(index)
+        else:
+            self.repo_filter_combo.setCurrentIndex(0)
+        self.repo_filter_combo.blockSignals(block)
+
         self._populate_results_table(result)
 
     def _populate_results_table(self, result: ContributionHistoryResult):
@@ -611,6 +678,7 @@ class ContributionHistoryTab(QWidget):
                 row += 1
 
         self.results_table.resizeColumnsToContents()
+        self._apply_results_table_defaults()
         self._apply_titles_only_visibility()
 
     def _set_row_items(self, row: int, record: ContributionRecord):
@@ -656,8 +724,21 @@ class ContributionHistoryTab(QWidget):
     def _rerender_current_result(self):
         if not self.current_result:
             return
+        
+        records = self.current_result.records
+        
+        # Apply repo filter
+        repo_filter = self.repo_filter_combo.currentData()
+        if repo_filter:
+            records = [r for r in records if r.repository_display == repo_filter]
+        
+        # Apply local search filter (if any, though query already does some)
+        query = self.search_input.text().strip().lower()
+        if query:
+            records = [r for r in records if query in (r.primary_text or "").lower() or query in (r.description or "").lower() or query in (r.ticket_id or "").lower()]
+
         self.current_result.grouped_records = self.history_service._group_records(  # noqa: SLF001
-            self.current_result.records,
+            records,
             self.group_by_combo.currentData(),
         )
         self._populate_results_table(self.current_result)
@@ -688,8 +769,7 @@ class ContributionHistoryTab(QWidget):
         widgets = [
             self.run_button,
             self.export_button,
-            self.edit_scope_button,
-            self.refresh_scope_button,
+            self.custom_repo_combo,
             self.scope_combo,
             self.contribution_type_combo,
             self.search_input,
@@ -706,6 +786,9 @@ class ContributionHistoryTab(QWidget):
             self.exclude_bots_checkbox,
             self.titles_only_checkbox,
             self.view_mode_combo,
+            self.repo_filter_combo,
+            self.export_format_combo,
+            self.export_mode_combo,
         ]
         for widget in widgets:
             widget.setEnabled(not busy)
@@ -721,7 +804,8 @@ class ContributionHistoryTab(QWidget):
             self._elapsed_timer.stop()
             self._query_started_at = 0.0
             self._started_dt = None
-            self.status_label.setText(status)
+            self.cancel_token = None
+            self.status_label.setText(status if status else "Ready")
 
     def _on_progress_update(self, text: str):
         text = (text or "").strip()
@@ -762,15 +846,29 @@ class ContributionHistoryTab(QWidget):
         )
 
     def _load_scope_repositories(self, force_refresh: bool = False, silent: bool = False):
-        self.status_label.setText("Loading repository scope…")
+        self._set_status_if_idle("Loading repository scope…")
 
         def task():
             return self.scope_manager.list_accessible_repositories(force_refresh=force_refresh)
 
         def on_result(repositories: list[RepositoryRef]):
-            self.current_accessible_repositories = repositories
-            self.status_label.setText(f"Repository scope ready ({len(repositories)} repos)")
+            self.current_accessible_repositories = sorted(repositories, key=lambda r: r.display_name.lower())
+            
+            # Populate custom repo combo
+            block = self.custom_repo_combo.blockSignals(True)
+            self.custom_repo_combo.clear()
+            model = self.custom_repo_combo.model()
+            for i, repo in enumerate(self.current_accessible_repositories):
+                self.custom_repo_combo.addItem(repo.display_name, repo)
+                item = model.item(i)
+                item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Unchecked)
+            self.custom_repo_combo.update_display_text()
+            self.custom_repo_combo.blockSignals(block)
+
+            self._set_status_if_idle(f"Repository scope ready ({len(repositories)} repos)")
             self._refresh_developer_suggestions()
+            self._restore_custom_repo_selection()
 
         def on_error(exc: Exception):
             if not silent:
@@ -782,66 +880,6 @@ class ContributionHistoryTab(QWidget):
             on_result=on_result,
             on_error=on_error,
         )
-
-    def _edit_selected_repositories(self):
-        scope_mode = self.scope_combo.currentData()
-        if scope_mode == "selected_repos":
-            QMessageBox.information(
-                self,
-                "Settings Scope",
-                "This mode uses repositories selected in Settings.\n"
-                "Open Settings to change that selection, or switch to 'Custom repos (This tab)'.",
-            )
-            return
-
-        if self.current_accessible_repositories:
-            self._open_selected_repo_dialog(
-                self.current_accessible_repositories,
-                selected=self.custom_selected_repositories,
-                on_save=self._save_custom_selected_repositories,
-            )
-            return
-
-        self._set_busy(True, "Loading repositories…")
-
-        def task():
-            return self.scope_manager.list_accessible_repositories(force_refresh=False)
-
-        def on_result(repositories: list[RepositoryRef]):
-            self.current_accessible_repositories = repositories
-            self._open_selected_repo_dialog(
-                repositories,
-                selected=self.custom_selected_repositories,
-                on_save=self._save_custom_selected_repositories,
-            )
-
-        def on_error(exc: Exception):
-            QMessageBox.warning(self, "Repositories", str(exc))
-
-        self.task_runner.run(
-            task,
-            description="Load Repositories",
-            on_result=on_result,
-            on_error=on_error,
-            on_finished=lambda: self._set_busy(False, "Ready"),
-        )
-
-    def _open_selected_repo_dialog(self, repositories: list[RepositoryRef], selected: list[RepositoryRef], on_save):
-        dialog = RepositorySelectionDialog(
-            repositories=repositories,
-            selected=selected,
-            parent=self,
-        )
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        chosen = dialog.selected_repositories()
-        on_save(chosen)
-        self.status_label.setText(f"Saved {len(chosen)} custom repositories.")
-        self._refresh_developer_suggestions()
-
-    def _save_custom_selected_repositories(self, repositories: list[RepositoryRef]):
-        self.custom_selected_repositories = list(repositories or [])
-        self._save_persisted_state()
 
     def _set_default_dates(self):
         self.preset_combo.setCurrentIndex(self.preset_combo.findData("12m"))
@@ -894,19 +932,19 @@ class ContributionHistoryTab(QWidget):
 
     def _on_scope_mode_changed(self):
         scope_mode = self.scope_combo.currentData()
-        if scope_mode == "selected_repos":
-            self.edit_scope_button.setText("Using Settings selection")
-            self.edit_scope_button.setToolTip(
-                "This scope reads repository selection from Settings."
-            )
-        elif scope_mode == "custom_repos":
-            self.edit_scope_button.setText("Edit custom repositories")
-            self.edit_scope_button.setToolTip(
-                "Choose repositories for this tab only (independent of Settings)."
-            )
-        else:
-            self.edit_scope_button.setText("Edit scope repositories")
-            self.edit_scope_button.setToolTip("Scope editing is available for custom mode.")
+        self.custom_repo_combo.setVisible(scope_mode == "custom_repos")
+        self._refresh_developer_suggestions()
+
+    def _on_custom_repo_changed(self):
+        self.custom_repo_combo.update_display_text()
+        self._refresh_developer_suggestions()
+        self._save_persisted_state()
+
+    def _restore_custom_repo_selection(self):
+        state = self.config.get_contribution_history_state()
+        if state and "custom_repo_keys" in state:
+            keys = state.get("custom_repo_keys", [])
+            self.custom_repo_combo.set_checked_items(keys)
 
     def _set_developer_text(self, text: str):
         block = self.developer_combo.blockSignals(True)
@@ -1001,11 +1039,16 @@ class ContributionHistoryTab(QWidget):
             return
         self._developer_suggestions_loading = True
         current_text = self.developer_combo.currentText().strip()
-        self.status_label.setText("Loading developer suggestions…")
+        self._set_status_if_idle("Loading developer suggestions…")
 
         def task():
-            scope = self.scope_manager.resolve_scope(self.scope_combo.currentData())
-            repositories = list(scope.repositories)
+            scope_mode = self.scope_combo.currentData()
+            if scope_mode == "custom_repos":
+                repositories = self.custom_repo_combo.checked_items()
+            else:
+                scope = self.scope_manager.resolve_scope(scope_mode)
+                repositories = list(scope.repositories)
+
             if not repositories:
                 return []
             if len(repositories) > 10:
@@ -1027,7 +1070,7 @@ class ContributionHistoryTab(QWidget):
             if live_text:
                 self._set_developer_text(live_text)
             self._merge_developer_candidates(candidates)
-            self.status_label.setText(
+            self._set_status_if_idle(
                 f"Developer suggestions ready ({len(candidates)} found)"
             )
 
@@ -1036,7 +1079,7 @@ class ContributionHistoryTab(QWidget):
             if live_text:
                 self._set_developer_text(live_text)
             self._merge_developer_candidates([])
-            self.status_label.setText("Developer suggestions unavailable")
+            self._set_status_if_idle("Developer suggestions unavailable")
 
         def on_finished():
             self._developer_suggestions_loading = False
@@ -1082,11 +1125,8 @@ class ContributionHistoryTab(QWidget):
             text = (value or "").strip()
             if text:
                 self.selected_developers_list.addItem(text)
-        self.custom_selected_repositories = [
-            RepositoryRef.from_dict(item)
-            for item in state.get("custom_repositories", [])
-            if isinstance(item, dict)
-        ]
+        
+        self._restore_custom_repo_selection()
 
         self._set_combo_data(self.preset_combo, state.get("preset", "12m"))
         self._set_combo_data(self.scope_combo, state.get("scope", "all_repos"))
@@ -1111,6 +1151,7 @@ class ContributionHistoryTab(QWidget):
         self._apply_date_preset()
 
     def _save_persisted_state(self):
+        checked_repos = self.custom_repo_combo.checked_items()
         state = {
             "developers": self._selected_developers(),
             "developer_input": self.developer_combo.currentText().strip(),
@@ -1126,7 +1167,7 @@ class ContributionHistoryTab(QWidget):
             "advanced_visible": self.advanced_toggle_button.isChecked(),
             "start_date": self.start_date_edit.date().toString("yyyy-MM-dd"),
             "end_date": self.end_date_edit.date().toString("yyyy-MM-dd"),
-            "custom_repositories": [repo.to_dict() for repo in self.custom_selected_repositories],
+            "custom_repo_keys": [repo.key for repo in checked_repos],
         }
         self.config.set_contribution_history_state(state)
 
@@ -1143,3 +1184,21 @@ class ContributionHistoryTab(QWidget):
         elif self.titles_only_checkbox.isChecked():
             self.titles_only_checkbox.setChecked(False)
         self._apply_titles_only_visibility()
+
+    def _set_status_if_idle(self, text: str):
+        if self.progress_bar.isVisible():
+            return
+        self.status_label.setText(text)
+
+    def _apply_results_table_defaults(self):
+        default_widths = {
+            "date": 110,
+            "repository": 200,
+            "type": 90,
+            "text": 360,
+            "ticket": 110,
+            "description": 280,
+        }
+        for key, width in default_widths.items():
+            if key in self.COLUMN_KEYS:
+                self.results_table.setColumnWidth(self.COLUMN_KEYS.index(key), width)
