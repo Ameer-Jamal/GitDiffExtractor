@@ -100,6 +100,13 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertTrue(cfg.get_ai_copy_with_prompt())
         self.assertEqual(cfg.get_ai_prompt_text(), "Please summarize and list risks.")
 
+    def test_pr_description_roundtrip(self):
+        cfg = TestConfigManager()
+        cfg.set_pr_description("Adds the requested behavior.")
+        self.assertEqual(cfg.get_pr_description(), "Adds the requested behavior.")
+        cfg.set_pr_description("")
+        self.assertEqual(cfg.get_pr_description(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

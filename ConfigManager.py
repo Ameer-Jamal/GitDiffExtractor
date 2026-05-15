@@ -28,6 +28,7 @@ class ConfigManager:
         "origin_branch": "",
         "commit_hashes": "",
         "pr_title": "",
+        "pr_description": "",
         "source_branch": "",
         "target_branch": "",
     }
@@ -339,6 +340,12 @@ class ConfigManager:
 
     def set_pr_title(self, title: str) -> None:
         self._update_repo_value("pr_title", title)
+
+    def get_pr_description(self) -> str:
+        return self.repo_config.get("pr_description", "")
+
+    def set_pr_description(self, description: str) -> None:
+        self._update_repo_value("pr_description", description)
 
     def get_source_branch(self) -> str:
         return self.repo_config.get("source_branch", "")
