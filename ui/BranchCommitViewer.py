@@ -3,6 +3,7 @@ import platform
 import subprocess
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QPushButton,
@@ -238,13 +239,28 @@ class BranchCommitViewer(QWidget):
 
         def on_result(result):
             diff_file_path, resolved_branch = result
-            QMessageBox.information(
-                self,
-                "Success",
-                f"All diffs for branch {resolved_branch} "
-                f"{f'({repo_label}) ' if repo_label else ''}saved to {diff_file_path}.",
-            )
-            self.openFile(diff_file_path)
+            open_in_editor = self.config_manager.get_open_in_editor()
+            copy_to_clipboard = self.config_manager.get_copy_to_clipboard()
+
+            if copy_to_clipboard:
+                try:
+                    with open(diff_file_path, 'r', encoding='utf-8') as f:
+                        QApplication.clipboard().setText(f.read())
+                except Exception as e:
+                    print(f"Failed to copy to clipboard: {e}")
+
+            if open_in_editor:
+                self.openFile(diff_file_path)
+
+            msg = f"All diffs for branch {resolved_branch} {f'({repo_label}) ' if repo_label else ''}processed."
+            if copy_to_clipboard:
+                msg += "\nContent copied to clipboard."
+            if open_in_editor:
+                msg += f"\nFile saved to {diff_file_path} and opened."
+            else:
+                msg += f"\nFile saved to {diff_file_path}."
+
+            QMessageBox.information(self, "Success", msg)
 
         def on_error(exc: Exception):
             QMessageBox.critical(self, "Error", f"An error occurred:\n{exc}")

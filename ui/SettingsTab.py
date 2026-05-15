@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QRadioButton,
     QButtonGroup,
+    QCheckBox,
     QLineEdit,
     QLabel,
     QPushButton,
@@ -19,6 +20,8 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QFileDialog,
+    QTextEdit,
+    QToolButton,
 )
 
 from services.RepositoryProvider import RepositoryProvider
@@ -59,6 +62,17 @@ class SettingsTab(QWidget):
         self.output_input = None
         self.output_browse_button = None
         self.open_reports_button = None
+        self.open_in_editor_checkbox = None
+        self.copy_to_clipboard_checkbox = None
+        self.copy_open_ai_checkbox = None
+        self.editor_app_input = None
+        self.ai_openai_checkbox = None
+        self.ai_claude_checkbox = None
+        self.ai_gemini_checkbox = None
+        self.ai_grok_checkbox = None
+        self.ai_custom_links_input = None
+        self.ai_copy_with_prompt_checkbox = None
+        self.ai_prompt_text_edit = None
 
         self._repos = []
         self._activation_in_progress = False
@@ -69,6 +83,27 @@ class SettingsTab(QWidget):
 
     # ------------------------------------------------------------------
     # UI construction
+    def _info_button(self, text: str) -> QToolButton:
+        button = QToolButton(self)
+        button.setText("i")
+        button.setAutoRaise(True)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            "QToolButton {"
+            "color: #0b63ce;"
+            "font-weight: 700;"
+            "border: 1px solid #0b63ce;"
+            "border-radius: 9px;"
+            "min-width: 18px;"
+            "max-width: 18px;"
+            "min-height: 18px;"
+            "max-height: 18px;"
+            "padding: 0px;"
+            "}"
+        )
+        button.clicked.connect(lambda: QMessageBox.information(self, "Info", text))
+        return button
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(15, 15, 15, 15)
@@ -93,6 +128,16 @@ class SettingsTab(QWidget):
         provider_layout.addWidget(self.github_radio)
         provider_layout.addStretch()
         layout.addWidget(provider_group)
+        provider_info_row = QHBoxLayout()
+        provider_info_label = QLabel("Help", self)
+        provider_info_row.addWidget(provider_info_label)
+        provider_info_row.addWidget(
+            self._info_button(
+                "Choose your provider, enter credentials, then use Repository Discovery to load and select repos."
+            )
+        )
+        provider_info_row.addStretch()
+        layout.addLayout(provider_info_row)
 
         # Bitbucket configuration
         self.bitbucket_group = QGroupBox("Bitbucket Settings", self)
@@ -104,15 +149,18 @@ class SettingsTab(QWidget):
         bb_form.setVerticalSpacing(8)
 
         self.bb_user_input = QLineEdit(self)
+        self.bb_user_input.setPlaceholderText("Bitbucket username")
         self.bb_user_input.editingFinished.connect(self._store_bitbucket_username)
         bb_form.addRow(QLabel("Username:"), self.bb_user_input)
 
         self.bb_password_input = QLineEdit(self)
         self.bb_password_input.setEchoMode(QLineEdit.Password)
+        self.bb_password_input.setPlaceholderText("Bitbucket app password")
         self.bb_password_input.editingFinished.connect(self._store_bitbucket_password)
         bb_form.addRow(QLabel("App Password:"), self.bb_password_input)
 
         self.bb_workspace_input = QLineEdit(self)
+        self.bb_workspace_input.setPlaceholderText("Workspace id (for example: etqdev)")
         self.bb_workspace_input.editingFinished.connect(self._store_bitbucket_workspace)
         bb_form.addRow(QLabel("Workspace:"), self.bb_workspace_input)
 
@@ -128,12 +176,13 @@ class SettingsTab(QWidget):
         gh_form.setVerticalSpacing(8)
 
         self.github_owner_input = QLineEdit(self)
-        self.github_owner_input.setPlaceholderText("Optional owner/org filter")
+        self.github_owner_input.setPlaceholderText("Owner/org (optional)")
         self.github_owner_input.editingFinished.connect(self._store_github_owner)
         gh_form.addRow(QLabel("Owner Filter:"), self.github_owner_input)
 
         self.github_token_input = QLineEdit(self)
         self.github_token_input.setEchoMode(QLineEdit.Password)
+        self.github_token_input.setPlaceholderText("GitHub personal access token")
         self.github_token_input.editingFinished.connect(self._store_github_token)
         gh_form.addRow(QLabel("Token:"), self.github_token_input)
 
@@ -161,6 +210,72 @@ class SettingsTab(QWidget):
         output_layout.addWidget(self.open_reports_button)
 
         application_form.addRow(QLabel("Output Directory:"), output_layout)
+
+        self.open_in_editor_checkbox = QCheckBox("Open in code editor", self)
+        self.open_in_editor_checkbox.setToolTip("After generating a diff, open the file in your configured editor.")
+        self.open_in_editor_checkbox.toggled.connect(self._store_open_in_editor)
+        application_form.addRow(self.open_in_editor_checkbox)
+        editor_app_layout = QHBoxLayout()
+        self.editor_app_input = QLineEdit(self)
+        self.editor_app_input.setPlaceholderText("Optional editor app path/name for 'Open in code editor'")
+        self.editor_app_input.editingFinished.connect(self._store_editor_app_path)
+        editor_app_layout.addWidget(self.editor_app_input)
+        editor_browse_button = QPushButton("Browse", self)
+        editor_browse_button.clicked.connect(self.browse_editor_app)
+        editor_app_layout.addWidget(editor_browse_button)
+        application_form.addRow(QLabel("Open With (Editor):"), editor_app_layout)
+
+        self.copy_to_clipboard_checkbox = QCheckBox("Copy to clipboard", self)
+        self.copy_to_clipboard_checkbox.setToolTip("After generating a diff, copy the content to clipboard.")
+        self.copy_to_clipboard_checkbox.toggled.connect(self._store_copy_to_clipboard)
+        application_form.addRow(self.copy_to_clipboard_checkbox)
+        ai_header_row = QHBoxLayout()
+        ai_header_label = QLabel("AI Assistant Options", self)
+        ai_header_label.setStyleSheet("QLabel { font-weight: 600; }")
+        ai_header_row.addWidget(ai_header_label)
+        ai_header_row.addWidget(
+            self._info_button(
+                "When enabled, RepoLens copies diff content, optionally prepends your prompt, "
+                "and opens only the AI tabs/links you selected."
+            )
+        )
+        ai_header_row.addStretch()
+        application_form.addRow(ai_header_row)
+        self.copy_open_ai_checkbox = QCheckBox("Copy and open AI tabs (OpenAI, Claude, Gemini, Grok)", self)
+        self.copy_open_ai_checkbox.setToolTip("Copies diff text, then opens browser tabs for supported AI tools.")
+        self.copy_open_ai_checkbox.toggled.connect(self._store_copy_open_ai)
+        application_form.addRow(self.copy_open_ai_checkbox)
+        ai_targets_row = QHBoxLayout()
+        self.ai_openai_checkbox = QCheckBox("OpenAI", self)
+        self.ai_openai_checkbox.toggled.connect(self._store_ai_targets)
+        ai_targets_row.addWidget(self.ai_openai_checkbox)
+        self.ai_claude_checkbox = QCheckBox("Claude", self)
+        self.ai_claude_checkbox.toggled.connect(self._store_ai_targets)
+        ai_targets_row.addWidget(self.ai_claude_checkbox)
+        self.ai_gemini_checkbox = QCheckBox("Gemini", self)
+        self.ai_gemini_checkbox.toggled.connect(self._store_ai_targets)
+        ai_targets_row.addWidget(self.ai_gemini_checkbox)
+        self.ai_grok_checkbox = QCheckBox("Grok", self)
+        self.ai_grok_checkbox.toggled.connect(self._store_ai_targets)
+        ai_targets_row.addWidget(self.ai_grok_checkbox)
+        ai_targets_row.addStretch()
+        application_form.addRow(QLabel("AI Tabs:"), ai_targets_row)
+        self.ai_custom_links_input = QLineEdit(self)
+        self.ai_custom_links_input.setPlaceholderText("Custom AI links (comma-separated URLs)")
+        self.ai_custom_links_input.setToolTip("Enter one or more URLs separated by commas.")
+        self.ai_custom_links_input.editingFinished.connect(self._store_ai_custom_links)
+        application_form.addRow(QLabel("Custom Links:"), self.ai_custom_links_input)
+        self.ai_copy_with_prompt_checkbox = QCheckBox("Copy with prompt", self)
+        self.ai_copy_with_prompt_checkbox.setToolTip("Prepends your prompt above copied diff content.")
+        self.ai_copy_with_prompt_checkbox.toggled.connect(self._store_ai_copy_with_prompt)
+        application_form.addRow(self.ai_copy_with_prompt_checkbox)
+        self.ai_prompt_text_edit = QTextEdit(self)
+        self.ai_prompt_text_edit.setPlaceholderText("Example: Review this diff and list risks, bugs, and improvements.")
+        self.ai_prompt_text_edit.setToolTip("Editable prompt used when 'Copy with prompt' is enabled.")
+        self.ai_prompt_text_edit.setFixedHeight(90)
+        self.ai_prompt_text_edit.textChanged.connect(self._store_ai_prompt_text)
+        application_form.addRow(QLabel("Prompt Text:"), self.ai_prompt_text_edit)
+
         layout.addWidget(application_group)
 
         discovery_group = QGroupBox("Repository Discovery", self)
@@ -170,6 +285,7 @@ class SettingsTab(QWidget):
 
         controls = QHBoxLayout()
         self.discover_button = QPushButton("Load Repositories", self)
+        self.discover_button.setToolTip("Fetch repositories from the selected provider.")
         self.discover_button.clicked.connect(self.discover_repositories)
         controls.addWidget(self.discover_button)
 
@@ -182,12 +298,25 @@ class SettingsTab(QWidget):
         controls.addWidget(self.clear_checked_button)
 
         self.activate_button = QPushButton("Use Selected Repositories", self)
+        self.activate_button.setToolTip("Save checked repositories and set the first one as primary.")
+        self.activate_button.setStyleSheet(
+            "QPushButton {"
+            "background-color: #0b63ce;"
+            "color: white;"
+            "font-weight: 700;"
+            "border: 1px solid #084b9e;"
+            "border-radius: 6px;"
+            "padding: 6px 12px;"
+            "}"
+            "QPushButton:hover { background-color: #0958b8; }"
+            "QPushButton:pressed { background-color: #074894; }"
+            "QPushButton:disabled { background-color: #7aa8df; color: #f3f7ff; }"
+        )
         self.activate_button.clicked.connect(self.activate_selected_repositories)
         controls.addWidget(self.activate_button)
         controls.addStretch()
 
         discovery_layout.addLayout(controls)
-
         self.repo_status = QLabel("No repositories loaded.", self)
         self.repo_status.setWordWrap(True)
         discovery_layout.addWidget(self.repo_status)
@@ -223,6 +352,36 @@ class SettingsTab(QWidget):
         self._set_line_edit(self.github_token_input, self.config.get_github_token())
         self._set_line_edit(self.output_input, self.config.get_output_dir())
 
+        self.open_in_editor_checkbox.blockSignals(True)
+        self.open_in_editor_checkbox.setChecked(self.config.get_open_in_editor())
+        self.open_in_editor_checkbox.blockSignals(False)
+
+        self.copy_to_clipboard_checkbox.blockSignals(True)
+        self.copy_to_clipboard_checkbox.setChecked(self.config.get_copy_to_clipboard())
+        self.copy_to_clipboard_checkbox.blockSignals(False)
+        self.copy_open_ai_checkbox.blockSignals(True)
+        self.copy_open_ai_checkbox.setChecked(self.config.get_copy_open_ai())
+        self.copy_open_ai_checkbox.blockSignals(False)
+        self._set_line_edit(self.editor_app_input, self.config.get_editor_app_path())
+        ai_targets = self.config.get_ai_targets()
+        for key, widget in (
+            ("openai", self.ai_openai_checkbox),
+            ("claude", self.ai_claude_checkbox),
+            ("gemini", self.ai_gemini_checkbox),
+            ("grok", self.ai_grok_checkbox),
+        ):
+            block = widget.blockSignals(True)
+            widget.setChecked(bool(ai_targets.get(key, False)))
+            widget.blockSignals(block)
+        self._set_line_edit(self.ai_custom_links_input, ", ".join(self.config.get_ai_custom_links()))
+        self.ai_copy_with_prompt_checkbox.blockSignals(True)
+        self.ai_copy_with_prompt_checkbox.setChecked(self.config.get_ai_copy_with_prompt())
+        self.ai_copy_with_prompt_checkbox.blockSignals(False)
+        self.ai_prompt_text_edit.blockSignals(True)
+        self.ai_prompt_text_edit.setPlainText(self.config.get_ai_prompt_text())
+        self.ai_prompt_text_edit.blockSignals(False)
+        self._update_ai_section_enabled()
+
         self._selected_repo_map = {
             str((repo or {}).get("id", "")): repo
             for repo in self.config.get_selected_repositories()
@@ -242,7 +401,7 @@ class SettingsTab(QWidget):
 
         if selected_repos:
             self.repo_status.setText(
-                f"Selected repositories: {len(selected_repos)} | "
+                f"Ready. Selected repositories: {len(selected_repos)} | "
                 f"Primary: {active_owner}/{active_name} ({active_provider})"
             )
         elif active_name:
@@ -332,12 +491,75 @@ class SettingsTab(QWidget):
         self.config.set_output_dir(self.output_input.text().strip())
         self.settingsUpdated.emit()
 
+    def _store_open_in_editor(self, checked):
+        self.config.set_open_in_editor(checked)
+        self.settingsUpdated.emit()
+
+    def _store_copy_to_clipboard(self, checked):
+        self.config.set_copy_to_clipboard(checked)
+        self.settingsUpdated.emit()
+
+    def _store_copy_open_ai(self, checked):
+        self.config.set_copy_open_ai(checked)
+        self._update_ai_section_enabled()
+        self.settingsUpdated.emit()
+
+    def _store_editor_app_path(self):
+        self.config.set_editor_app_path(self.editor_app_input.text().strip())
+        self.settingsUpdated.emit()
+
+    def _store_ai_targets(self):
+        self.config.set_ai_targets(
+            {
+                "openai": self.ai_openai_checkbox.isChecked(),
+                "claude": self.ai_claude_checkbox.isChecked(),
+                "gemini": self.ai_gemini_checkbox.isChecked(),
+                "grok": self.ai_grok_checkbox.isChecked(),
+            }
+        )
+        self.settingsUpdated.emit()
+
+    def _store_ai_custom_links(self):
+        raw = self.ai_custom_links_input.text().strip()
+        links = [item.strip() for item in raw.split(",") if item.strip()]
+        self.config.set_ai_custom_links(links)
+        self.settingsUpdated.emit()
+
+    def _store_ai_copy_with_prompt(self, checked):
+        self.config.set_ai_copy_with_prompt(checked)
+        self.settingsUpdated.emit()
+
+    def _store_ai_prompt_text(self):
+        self.config.set_ai_prompt_text(self.ai_prompt_text_edit.toPlainText())
+        self.settingsUpdated.emit()
+
+    def _update_ai_section_enabled(self):
+        enabled = self.copy_open_ai_checkbox.isChecked()
+        for widget in (
+            self.ai_openai_checkbox,
+            self.ai_claude_checkbox,
+            self.ai_gemini_checkbox,
+            self.ai_grok_checkbox,
+            self.ai_custom_links_input,
+            self.ai_copy_with_prompt_checkbox,
+            self.ai_prompt_text_edit,
+        ):
+            widget.setEnabled(enabled)
+
     def browse_output_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if not directory:
             return
         self._set_line_edit(self.output_input, directory)
         self.config.set_output_dir(directory)
+        self.settingsUpdated.emit()
+
+    def browse_editor_app(self):
+        app_path, _ = QFileDialog.getOpenFileName(self, "Select Editor Application")
+        if not app_path:
+            return
+        self._set_line_edit(self.editor_app_input, app_path)
+        self.config.set_editor_app_path(app_path)
         self.settingsUpdated.emit()
 
     def open_reports_folder(self):
@@ -390,7 +612,7 @@ class SettingsTab(QWidget):
 
             if repos:
                 self.repo_status.setText(
-                    f"Loaded {len(repos)} repositories for {provider} ({source_label})."
+                    f"Loaded {len(repos)} repositories for {provider} ({source_label}). Select repositories and click 'Use Selected Repositories'."
                 )
             else:
                 self.repo_status.setText(f"No repositories found for {provider}.")
@@ -440,7 +662,7 @@ class SettingsTab(QWidget):
         self._activation_in_progress = True
         self._set_discovery_busy(
             False,
-            f"Preparing {len(repos)} repositories. Primary: {owner}/{slug}...",
+            f"Applying selection ({len(repos)} repositories). Primary will be {owner}/{slug}...",
         )
         self.activeRepositoriesChanged.emit(repos)
 

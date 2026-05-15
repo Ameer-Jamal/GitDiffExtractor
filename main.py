@@ -4,6 +4,7 @@ import re
 import subprocess
 import textwrap
 import time
+import webbrowser
 
 import requests
 from PyQt5.QtCore import Qt, QTimer
@@ -134,7 +135,7 @@ class RepoLens(QWidget):
 
         # Search Bar for PRs
         self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("Search PRs")
+        self.search_input.setPlaceholderText("Search by PR title, branch, author, or description")
         self.search_input.textChanged.connect(self._on_pr_search_text_changed)
         layout.addWidget(self.search_input)
 
@@ -142,17 +143,20 @@ class RepoLens(QWidget):
         self.pr_list = QListWidget(self)
         self.pr_list.itemClicked.connect(self.onPRClick)
         self.pr_list.itemDoubleClicked.connect(self.generateDiff)
+        self.pr_list.itemSelectionChanged.connect(self._update_generate_button_text)
         self.pr_list.verticalScrollBar().valueChanged.connect(self._on_pr_list_scrolled)
         self.pr_list.setItemDelegate(PRListDelegate(self.pr_list))
         layout.addWidget(self.pr_list)
 
         # Load PRs Button
         self.pr_button = QPushButton('List Diffs', self)
+        self.pr_button.setToolTip("Load pull requests using the selected mode, repository filter, and developer filter.")
         self.pr_button.clicked.connect(self.listPRs)
         layout.addWidget(self.pr_button)
         self._pr_button_label = self.pr_button.text()
 
         self.load_more_button = QPushButton('Load More', self)
+        self.load_more_button.setToolTip("Load the next page of results.")
         self.load_more_button.clicked.connect(self.loadMorePRs)
         self.load_more_button.setEnabled(False)
         self.load_more_button.setVisible(False)
@@ -174,9 +178,16 @@ class RepoLens(QWidget):
         self.radio_group.addButton(self.all_diffs_radio)
 
         # Add the radio buttons to the layout
+        mode_hint = QLabel("Choose the list mode before loading. 'Only Pull Requests' is best for most cases.")
+        mode_hint.setWordWrap(True)
+        layout.addWidget(mode_hint)
         layout.addWidget(self.only_pr_radio)
         layout.addWidget(self.only_merges_radio)
         layout.addWidget(self.all_diffs_radio)
+        
+        self.only_pr_radio.toggled.connect(self._update_list_button_text)
+        self.only_merges_radio.toggled.connect(self._update_list_button_text)
+        self.all_diffs_radio.toggled.connect(self._update_list_button_text)
 
         developer_layout = QHBoxLayout()
         developer_layout.addWidget(QLabel("Developer:"))
@@ -186,14 +197,40 @@ class RepoLens(QWidget):
         self.developer_filter_combo.addItem("Me", "me")
         if self.developer_filter_combo.lineEdit():
             self.developer_filter_combo.lineEdit().setPlaceholderText("Me, username, display name, or email")
+        self.developer_filter_combo.setToolTip("Optional: restrict listed PRs to a specific developer.")
         developer_layout.addWidget(self.developer_filter_combo)
         layout.addLayout(developer_layout)
 
+        repo_filter_layout = QHBoxLayout()
+        repo_filter_layout.addWidget(QLabel("Repository:"))
+        self.repo_filter_combo = QComboBox(self)
+        self.repo_filter_combo.addItem("All repositories", "")
+        self.repo_filter_combo.currentIndexChanged.connect(self.searchPRs)
+        self.repo_filter_combo.setToolTip("Optional: narrow visible results to one selected repository.")
+        repo_filter_layout.addWidget(self.repo_filter_combo)
+        layout.addLayout(repo_filter_layout)
+
         # Generate Diff Button
         self.run_button = QPushButton('Generate Diff', self)
+        self.run_button.setStyleSheet(
+            "QPushButton {"
+            "background-color: #0b63ce;"
+            "color: white;"
+            "font-weight: 700;"
+            "border: 1px solid #084b9e;"
+            "border-radius: 6px;"
+            "padding: 6px 12px;"
+            "}"
+            "QPushButton:hover { background-color: #0958b8; }"
+            "QPushButton:pressed { background-color: #074894; }"
+            "QPushButton:disabled { background-color: #7aa8df; color: #f3f7ff; }"
+        )
         self.run_button.clicked.connect(self.generateDiff)
         layout.addWidget(self.run_button)
         self._run_button_label = self.run_button.text()
+        self._update_list_button_text()
+        self._update_generate_button_text()
+        self.commit_input.textChanged.connect(self._update_generate_button_text)
         self._pr_search_timer = QTimer(self)
         self._pr_search_timer.setSingleShot(True)
         self._pr_search_timer.timeout.connect(self._perform_debounced_pr_search)
@@ -275,12 +312,15 @@ class RepoLens(QWidget):
                 else:
                     try:
                         diff_path, state = self._generate_pr_diff(pr_data, repo_dir, output_dir)
-                        QMessageBox.information(
-                            self,
-                            "Success",
-                            f"Diff for PR #{pr_data.get('id')} ({state}) saved to {diff_path}.",
-                        )
-                        self.openFile(diff_path)
+                        actions = self._post_process_diff_outputs([diff_path])
+                        msg = f"Diff for PR #{pr_data.get('id')} ({state}) processed."
+                        if actions["copied"]:
+                            msg += "\nContent copied to clipboard."
+                        if actions["opened_ai_tabs"]:
+                            msg += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
+                        if actions["missing_ai_targets"]:
+                            msg += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
+                        QMessageBox.information(self, "Success", msg)
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.critical(self, "Error", f"Failed to generate PR diff:\n{exc}")
                 return
@@ -299,9 +339,14 @@ class RepoLens(QWidget):
 
         try:
             diff_paths, warnings = self._generate_commit_diffs(repo_dir, commit_hashes, output_dir)
-            for path in diff_paths:
-                self.openFile(path)
-            message = f"Created {len(diff_paths)} diff file(s)."
+            actions = self._post_process_diff_outputs(diff_paths)
+            message = f"Processed {len(diff_paths)} diff file(s)."
+            if actions["copied"]:
+                message += "\nContent copied to clipboard."
+            if actions["opened_ai_tabs"]:
+                message += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
+            if actions["missing_ai_targets"]:
+                message += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
             if warnings:
                 message += "\n\nWarnings:\n" + "\n".join(warnings)
             QMessageBox.information(self, "Success", message)
@@ -310,6 +355,11 @@ class RepoLens(QWidget):
 
     def listPRs(self):
         selected_repos = self.config_manager.get_selected_repositories()
+        repo_filter_id = self.repo_filter_combo.currentData() if self.repo_filter_combo else ""
+        
+        if repo_filter_id:
+            selected_repos = [r for r in selected_repos if str(r.get('id', '')) == str(repo_filter_id)]
+
         if not selected_repos:
             repo_dir = self._require_active_repo_dir()
             if not repo_dir:
@@ -341,7 +391,7 @@ class RepoLens(QWidget):
         self._current_cursor_state = PRAggregationService.seed_cursor_state(selected_repos)
         self._last_remote_search_key = None
 
-        cache_key = (provider, tuple(sorted(repo_ids)), filter_mode, developer_filter.lower())
+        cache_key = (provider, tuple(sorted(repo_ids)), filter_mode, developer_filter.lower(), str(repo_filter_id))
         cached = self._pr_cache.get(cache_key)
         if cached:
             timestamp, cached_prs, cached_next = cached
@@ -465,11 +515,13 @@ class RepoLens(QWidget):
         self.load_more_button.setEnabled(PRAggregationService.has_more(self._current_cursor_state))
 
         repo_ids = [str((repo or {}).get('id', '')) for repo in getattr(self, '_current_selected_repos', []) if (repo or {}).get('id')]
+        repo_filter_id = self.repo_filter_combo.currentData() if self.repo_filter_combo else ""
         cache_key = (
             self._current_provider,
             tuple(sorted(repo_ids)),
             self._current_filter_mode,
             (self._current_developer_filter or '').lower(),
+            str(repo_filter_id),
         )
         self._pr_cache[cache_key] = (
             time.time(),
@@ -555,10 +607,20 @@ class RepoLens(QWidget):
 
     def _apply_local_pr_filter(self, query):
         local_matches = 0
+        repo_filter_id = self.repo_filter_combo.currentData() if self.repo_filter_combo else ""
+        
         for i in range(self.pr_list.count()):
             item = self.pr_list.item(i)
+            pr_data = item.data(Qt.UserRole) or {}
+            pr_repo_id = str(pr_data.get('repo_id', ''))
+            
             descriptor = item.data(Qt.UserRole + 1) or ""
-            is_match = (not query) or (query in descriptor)
+            
+            is_query_match = (not query) or (query in descriptor)
+            is_repo_match = (not repo_filter_id) or (pr_repo_id == str(repo_filter_id))
+            
+            is_match = is_query_match and is_repo_match
+            
             item.setHidden(not is_match)
             if is_match:
                 local_matches += 1
@@ -825,10 +887,12 @@ class RepoLens(QWidget):
             self.run_button,
             self.pr_list,
             self.search_input,
+            self.commit_input,
             self.only_pr_radio,
             self.only_merges_radio,
             self.all_diffs_radio,
             self.developer_filter_combo,
+            self.repo_filter_combo,
             self.load_more_button,
         ]
         for widget in widgets:
@@ -868,21 +932,34 @@ class RepoLens(QWidget):
             }
 
         def on_result(result):
+            paths = result['paths']
+            actions = self._post_process_diff_outputs(paths)
+
             if result['type'] == 'pr':
                 info = result['pr']
-                diff_path = result['paths'][0]
+                diff_path = paths[0]
                 state = result.get('state', 'UNKNOWN')
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    f"Diff for PR #{info.get('id')} ({state}) saved to {diff_path}.",
-                )
-                self.openFile(diff_path)
+                msg = f"Diff for PR #{info.get('id')} ({state}) processed."
+                if actions["copied"]:
+                    msg += "\nContent copied to clipboard."
+                if actions["opened_editor"]:
+                    msg += f"\nFile saved to {diff_path} and opened."
+                else:
+                    msg += f"\nFile saved to {diff_path}."
+                if actions["opened_ai_tabs"]:
+                    msg += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
+                if actions["missing_ai_targets"]:
+                    msg += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
+                QMessageBox.information(self, "Success", msg)
             else:
                 warnings = result.get('warnings', [])
-                for path in result['paths']:
-                    self.openFile(path)
-                message = f"Created {len(result['paths'])} diff file(s)."
+                message = f"Processed {len(paths)} diff file(s)."
+                if actions["copied"]:
+                    message += "\nContent copied to clipboard."
+                if actions["opened_ai_tabs"]:
+                    message += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
+                if actions["missing_ai_targets"]:
+                    message += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
                 if warnings:
                     message += "\n\nWarnings:\n" + "\n".join(warnings)
                 QMessageBox.information(self, "Success", message)
@@ -914,13 +991,146 @@ class RepoLens(QWidget):
             self.config_manager.set_commit_hashes(commit_hash)
 
     @staticmethod
-    def openFile(file_path):
-        if platform.system() == "Darwin":
-            subprocess.run(['open', file_path])
-        elif platform.system() == "Windows":
-            os.startfile(file_path)
+    def openFile(file_path, app_path=''):
+        app_path = (app_path or '').strip()
+        try:
+            if platform.system() == "Darwin":
+                if app_path:
+                    subprocess.run(['open', '-a', app_path, file_path], check=True)
+                else:
+                    subprocess.run(['open', file_path], check=True)
+            elif platform.system() == "Windows":
+                if app_path:
+                    subprocess.Popen([app_path, file_path])
+                else:
+                    os.startfile(file_path)
+            else:
+                if app_path:
+                    subprocess.Popen([app_path, file_path])
+                else:
+                    subprocess.run(['xdg-open', file_path], check=True)
+        except Exception:  # noqa: BLE001
+            # Fallback to OS default app if custom editor launch fails.
+            if platform.system() == "Windows":
+                os.startfile(file_path)
+            elif platform.system() == "Darwin":
+                subprocess.run(['open', file_path])
+            else:
+                subprocess.run(['xdg-open', file_path])
+
+    @staticmethod
+    def _open_ai_tabs(urls):
+        for url in urls:
+            webbrowser.open_new_tab(url)
+
+    @staticmethod
+    def _normalize_url(value):
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+        return f"https://{text}"
+
+    def _update_list_button_text(self):
+        if not hasattr(self, 'only_pr_radio') or not self.only_pr_radio:
+            return
+            
+        if self.only_pr_radio.isChecked():
+            self.pr_button.setText("List Open PRs")
+        elif self.only_merges_radio.isChecked():
+            self.pr_button.setText("List Merged PRs")
         else:
-            subprocess.run(['xdg-open', file_path])
+            self.pr_button.setText("List All Diffs")
+        self._pr_button_label = self.pr_button.text()
+
+    def _update_generate_button_text(self):
+        if not hasattr(self, 'pr_list') or not self.pr_list:
+            return
+            
+        selected_item = self.pr_list.currentItem()
+        if selected_item:
+            pr_data = selected_item.data(Qt.UserRole)
+            if isinstance(pr_data, dict):
+                pr_id = pr_data.get('id')
+                if pr_id:
+                    self.run_button.setText(f"Generate Diff for PR #{pr_id}")
+                    self.run_button.setToolTip("Generate a diff using the selected pull request.")
+                else:
+                    commit = pr_data.get('merge_commit') or pr_data.get('source_commit') or 'Selected'
+                    self.run_button.setText(f"Generate Diff for {commit[:10]}")
+                    self.run_button.setToolTip("Generate a diff using the selected list item.")
+            else:
+                self.run_button.setText(f"Generate Diff for Selected Item")
+                self.run_button.setToolTip("Generate a diff using the selected list item.")
+            self.run_button.setEnabled(True)
+        else:
+            commit_text = self.commit_input.text().strip()
+            if commit_text:
+                self.run_button.setText("Generate Diff for Entered Commits")
+                self.run_button.setEnabled(True)
+                self.run_button.setToolTip("Generate diff files for the entered commit hashes.")
+            else:
+                self.run_button.setText("Generate Diff")
+                self.run_button.setEnabled(False)
+                self.run_button.setToolTip("Select a PR or enter one or more commit hashes to enable this action.")
+        self._run_button_label = self.run_button.text()
+
+    def _post_process_diff_outputs(self, diff_paths):
+        open_in_editor = self.config_manager.get_open_in_editor()
+        copy_to_clipboard = self.config_manager.get_copy_to_clipboard()
+        copy_open_ai = self.config_manager.get_copy_open_ai()
+        editor_app_path = self.config_manager.get_editor_app_path()
+
+        all_content = []
+        if copy_to_clipboard or copy_open_ai:
+            for path in diff_paths:
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        all_content.append(f.read())
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Failed to read file for clipboard: {exc}")
+            if all_content:
+                body = "\n\n".join(all_content)
+                if copy_open_ai and self.config_manager.get_ai_copy_with_prompt():
+                    prompt = (self.config_manager.get_ai_prompt_text() or "").strip()
+                    if prompt:
+                        body = f"{prompt}\n\n{body}"
+                clipboard = QApplication.clipboard()
+                clipboard.setText(body)
+                if clipboard.supportsSelection():
+                    clipboard.setText(body, clipboard.Selection)
+                QApplication.processEvents()
+
+        if open_in_editor:
+            for path in diff_paths:
+                self.openFile(path, app_path=editor_app_path)
+
+        ai_urls = []
+        if copy_open_ai:
+            targets = self.config_manager.get_ai_targets()
+            builtins = [
+                ("openai", "https://chat.openai.com"),
+                ("claude", "https://claude.ai"),
+                ("gemini", "https://gemini.google.com"),
+                ("grok", "https://grok.com"),
+            ]
+            for key, url in builtins:
+                if targets.get(key, False):
+                    ai_urls.append(url)
+            for custom_link in self.config_manager.get_ai_custom_links():
+                normalized = self._normalize_url(custom_link)
+                if normalized:
+                    ai_urls.append(normalized)
+            if ai_urls:
+                self._open_ai_tabs(ai_urls)
+
+        return {
+            "copied": bool(all_content) and (copy_to_clipboard or copy_open_ai),
+            "opened_editor": open_in_editor,
+            "opened_ai_tabs": bool(ai_urls),
+            "missing_ai_targets": copy_open_ai and not bool(ai_urls),
+        }
 
     # ------------------------------------------------------------------
     # Configuration synchronisation
@@ -1075,10 +1285,30 @@ class RepoLens(QWidget):
     def apply_repo_config(self):
         repo_dir = self.config_manager.get_repo_dir()
         commits = self.config_manager.get_commit_hashes()
-        selected_count = len(self.config_manager.get_selected_repositories())
+        selected_repos = self.config_manager.get_selected_repositories()
+        selected_count = len(selected_repos)
 
         self._set_line_edit_text(self.repo_input, repo_dir)
         self._set_line_edit_text(self.commit_input, commits)
+
+        if self.repo_filter_combo:
+            current_filter = self.repo_filter_combo.currentData()
+            block = self.repo_filter_combo.blockSignals(True)
+            self.repo_filter_combo.clear()
+            self.repo_filter_combo.addItem("All repositories", "")
+            for repo in selected_repos:
+                repo_id = str(repo.get('id', ''))
+                label = repo.get('repo_label') or f"{repo.get('owner', '')}/{repo.get('slug', repo.get('name', ''))}"
+                if repo_id:
+                    self.repo_filter_combo.addItem(label, repo_id)
+            
+            index = self.repo_filter_combo.findData(current_filter)
+            if index >= 0:
+                self.repo_filter_combo.setCurrentIndex(index)
+            else:
+                self.repo_filter_combo.setCurrentIndex(0)
+            self.repo_filter_combo.blockSignals(block)
+
         if selected_count > 1:
             self.repo_label.setText(f'Primary Repository Directory ({selected_count} selected):')
         elif selected_count == 1:

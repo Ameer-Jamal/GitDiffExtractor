@@ -376,9 +376,18 @@ class BitbucketProviderClient(ProviderClient):
         cancel_check: CancelCheck = None,
     ) -> list[dict]:
         username, password = self._auth()
+        
+        # Build Bitbucket query expression for server-side filtering
+        query_parts = ['state="MERGED"']
+        if start_date:
+            # Buffer by 1 day to account for timezone differences in the initial fetch,
+            # we still filter strictly locally.
+            query_parts.append(f'updated_on >= "{start_date.isoformat()}T00:00:00Z"')
+            
+        q_param = " AND ".join(query_parts)
         next_url = (
             f"https://api.bitbucket.org/2.0/repositories/"
-            f"{repository.workspace}/{repository.slug}/pullrequests?state=MERGED&pagelen=50"
+            f"{repository.workspace}/{repository.slug}/pullrequests?q={requests.utils.quote(q_param)}&pagelen=50"
         )
         records: list[dict] = []
 
@@ -391,7 +400,12 @@ class BitbucketProviderClient(ProviderClient):
                 if records and _is_rate_limited_exception(exc):
                     break
                 raise
-            for pr in data.get("values", []):
+            
+            values = data.get("values", [])
+            if not values:
+                break
+                
+            for pr in values:
                 author_obj = pr.get("author") or {}
                 author = (author_obj.get("display_name")) or ""
                 username_value = (author_obj.get("username")) or ""
@@ -401,6 +415,7 @@ class BitbucketProviderClient(ProviderClient):
                 source_branch = ((pr.get("source") or {}).get("branch") or {}).get("name") or ""
                 destination_branch = ((pr.get("destination") or {}).get("branch") or {}).get("name") or ""
                 merged_on = pr.get("updated_on")
+                
                 if self._exclude_bot(author or nickname_value or username_value, exclude_bots):
                     continue
                 if not self._matches_developer(
@@ -418,7 +433,9 @@ class BitbucketProviderClient(ProviderClient):
                 if not self._is_date_in_range(merged_on, start_date, end_date):
                     continue
                 records.append(pr)
-            next_url = data.get("next")
+            
+            if next_url is not None:
+                next_url = data.get("next")
         return records
 
     def list_pull_request_commits(
@@ -478,7 +495,21 @@ class BitbucketProviderClient(ProviderClient):
                 if records and _is_rate_limited_exception(exc):
                     break
                 raise
-            for commit in data.get("values", []):
+            
+            values = data.get("values", [])
+            if not values:
+                break
+                
+            for commit in values:
+                commit_date = commit.get("date")
+                
+                # Early exit: Bitbucket commits are strictly descending
+                if start_date and commit_date:
+                    dt = normalize_record_datetime(commit_date)
+                    if dt and dt.date() < start_date:
+                        next_url = None
+                        break
+
                 author_user = (((commit.get("author") or {}).get("user")) or {})
                 author_display = author_user.get("display_name") or ""
                 author_nickname = author_user.get("nickname") or ""
@@ -500,10 +531,12 @@ class BitbucketProviderClient(ProviderClient):
                     branch_name = commit.get("branch") or ""
                     if not self._matches_branch(branch_filter, branch_name):
                         continue
-                if not self._is_date_in_range(commit.get("date"), start_date, end_date):
+                if not self._is_date_in_range(commit_date, start_date, end_date):
                     continue
                 records.append(commit)
-            next_url = data.get("next")
+            
+            if next_url is not None:
+                next_url = data.get("next")
         return records
 
     def list_developer_candidates(
@@ -689,11 +722,14 @@ class GitHubProviderClient(ProviderClient):
             )
             if not values:
                 break
+            
             for pr in values:
+                merged_at = pr.get("merged_at")
+                
                 author = ((pr.get("user") or {}).get("login")) or ""
                 if self._exclude_bot(author, exclude_bots):
                     continue
-                if not pr.get("merged_at"):
+                if not merged_at:
                     continue
                 if not self._matches_developer(author, developer=developer):
                     continue
@@ -705,7 +741,7 @@ class GitHubProviderClient(ProviderClient):
                     (pr.get("base") or {}).get("ref") or "",
                 ):
                     continue
-                if not self._is_date_in_range(pr.get("merged_at"), start_date, end_date):
+                if not self._is_date_in_range(merged_at, start_date, end_date):
                     continue
                 records.append(pr)
             page += 1
@@ -775,9 +811,18 @@ class GitHubProviderClient(ProviderClient):
             )
             if not values:
                 break
+            
             for commit in values:
                 inner_commit = commit.get("commit") or {}
                 author_obj = inner_commit.get("author") or {}
+                commit_date = author_obj.get("date")
+                
+                # Early exit: GitHub commits are sorted desc.
+                if start_date and commit_date:
+                    dt = normalize_record_datetime(commit_date)
+                    if dt and dt.date() < start_date:
+                        return records
+
                 author_login = ((commit.get("author") or {}).get("login")) or ""
                 author_email = author_obj.get("email") or ""
                 author_name = author_obj.get("name") or author_login
@@ -787,7 +832,6 @@ class GitHubProviderClient(ProviderClient):
                     continue
                 if not self._matches_search(inner_commit.get("message") or "", search_text=search_text):
                     continue
-                commit_date = author_obj.get("date")
                 if not self._is_date_in_range(commit_date, start_date, end_date):
                     continue
                 records.append(commit)

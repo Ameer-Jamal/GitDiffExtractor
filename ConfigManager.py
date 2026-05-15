@@ -28,6 +28,7 @@ class ConfigManager:
         "origin_branch": "",
         "commit_hashes": "",
         "pr_title": "",
+        "pr_description": "",
         "source_branch": "",
         "target_branch": "",
     }
@@ -51,6 +52,14 @@ class ConfigManager:
         "selected_repositories_json": "[]",
         "repo_discovery_cache_json": "{}",
         "contribution_history_state_json": "{}",
+        "open_in_editor": "true",
+        "copy_to_clipboard": "false",
+        "copy_open_ai": "false",
+        "editor_app_path": "",
+        "ai_targets_json": "{\"openai\": true, \"claude\": false, \"gemini\": false, \"grok\": false}",
+        "ai_custom_links_json": "[]",
+        "ai_copy_with_prompt": "false",
+        "ai_prompt_text": "Review this diff and provide concise feedback:",
     }
     LEGACY_REPO_PROVIDER_KEYS = (
         "provider",
@@ -332,6 +341,12 @@ class ConfigManager:
     def set_pr_title(self, title: str) -> None:
         self._update_repo_value("pr_title", title)
 
+    def get_pr_description(self) -> str:
+        return self.repo_config.get("pr_description", "")
+
+    def set_pr_description(self, description: str) -> None:
+        self._update_repo_value("pr_description", description)
+
     def get_source_branch(self) -> str:
         return self.repo_config.get("source_branch", "")
 
@@ -487,6 +502,80 @@ class ConfigManager:
     def set_contribution_history_state(self, state: dict) -> None:
         payload = state if isinstance(state, dict) else {}
         self._set_global("contribution_history_state_json", json.dumps(payload))
+
+    def get_open_in_editor(self) -> bool:
+        return self._get_global("open_in_editor").lower() == "true"
+
+    def set_open_in_editor(self, enabled: bool) -> None:
+        self._set_global("open_in_editor", "true" if enabled else "false")
+
+    def get_copy_to_clipboard(self) -> bool:
+        return self._get_global("copy_to_clipboard").lower() == "true"
+
+    def set_copy_to_clipboard(self, enabled: bool) -> None:
+        self._set_global("copy_to_clipboard", "true" if enabled else "false")
+
+    def get_copy_open_ai(self) -> bool:
+        return self._get_global("copy_open_ai").lower() == "true"
+
+    def set_copy_open_ai(self, enabled: bool) -> None:
+        self._set_global("copy_open_ai", "true" if enabled else "false")
+
+    def get_editor_app_path(self) -> str:
+        return self._get_global("editor_app_path")
+
+    def set_editor_app_path(self, value: str) -> None:
+        self._set_global("editor_app_path", value)
+
+    def get_ai_targets(self) -> dict:
+        raw = self._get_global("ai_targets_json")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return {
+            "openai": bool(parsed.get("openai", True)),
+            "claude": bool(parsed.get("claude", False)),
+            "gemini": bool(parsed.get("gemini", False)),
+            "grok": bool(parsed.get("grok", False)),
+        }
+
+    def set_ai_targets(self, targets: dict) -> None:
+        payload = {
+            "openai": bool((targets or {}).get("openai", False)),
+            "claude": bool((targets or {}).get("claude", False)),
+            "gemini": bool((targets or {}).get("gemini", False)),
+            "grok": bool((targets or {}).get("grok", False)),
+        }
+        self._set_global("ai_targets_json", json.dumps(payload))
+
+    def get_ai_custom_links(self) -> list[str]:
+        raw = self._get_global("ai_custom_links_json")
+        try:
+            parsed = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            parsed = []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item).strip() for item in parsed if str(item).strip()]
+
+    def set_ai_custom_links(self, links: list[str]) -> None:
+        payload = [str(item).strip() for item in (links or []) if str(item).strip()]
+        self._set_global("ai_custom_links_json", json.dumps(payload))
+
+    def get_ai_copy_with_prompt(self) -> bool:
+        return self._get_global("ai_copy_with_prompt").lower() == "true"
+
+    def set_ai_copy_with_prompt(self, enabled: bool) -> None:
+        self._set_global("ai_copy_with_prompt", "true" if enabled else "false")
+
+    def get_ai_prompt_text(self) -> str:
+        return self._get_global("ai_prompt_text")
+
+    def set_ai_prompt_text(self, text: str) -> None:
+        self._set_global("ai_prompt_text", text or "")
 
     def get_managed_repo_root(self) -> str:
         stored = self.settings.value("managed_repo_root", "", str)
