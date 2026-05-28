@@ -82,7 +82,10 @@ The MCP server is read-only for provider data. It may clone or fetch local repos
 - `get_ticket_diffs`
 - `get_pr_diff`
 - `get_commit_diff`
-- `query_contribution_history`
+- `query_contribution_history` (with fuzzy repository resolution and diagnostic info)
+- `find_pr_for_commit` (Link commits to their parent PRs)
+- `search_contributions_by_ticket` (Deep search across repositories for a ticket)
+- `analyze_file_history` (Unified commit and PR history for a specific file)
 - `list_developer_candidates`
 
 ### **General Setup**

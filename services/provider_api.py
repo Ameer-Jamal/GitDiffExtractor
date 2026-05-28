@@ -169,6 +169,25 @@ class ProviderClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_pull_requests_for_commit(
+        self,
+        repository: RepositoryRef,
+        commit_hash: str,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_commits_for_file(
+        self,
+        repository: RepositoryRef,
+        file_path: str,
+        since_date: Optional[date] = None,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_developer_candidates(
         self,
         repository: RepositoryRef,
@@ -539,6 +558,75 @@ class BitbucketProviderClient(ProviderClient):
                 next_url = data.get("next")
         return records
 
+    def list_pull_requests_for_commit(
+        self,
+        repository: RepositoryRef,
+        commit_hash: str,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        username, password = self._auth()
+        next_url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{repository.workspace}/{repository.slug}/commit/{commit_hash}/pullrequests"
+        )
+        records: list[dict] = []
+        while next_url:
+            if _should_cancel(cancel_check):
+                break
+            try:
+                data = _get_bitbucket_page_with_resume(next_url, auth=(username, password), timeout=20)
+            except Exception as exc:  # noqa: BLE001
+                if records and _is_rate_limited_exception(exc):
+                    break
+                raise
+            records.extend(data.get("values", []))
+            next_url = data.get("next")
+        return records
+
+    def list_commits_for_file(
+        self,
+        repository: RepositoryRef,
+        file_path: str,
+        since_date: Optional[date] = None,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        username, password = self._auth()
+        # Commits are sorted descending by default.
+        next_url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{repository.workspace}/{repository.slug}/commits?pagelen=100"
+        )
+        if file_path:
+            next_url += f"&path={requests.utils.quote(file_path)}"
+
+        records: list[dict] = []
+        while next_url:
+            if _should_cancel(cancel_check):
+                break
+            try:
+                data = _get_bitbucket_page_with_resume(next_url, auth=(username, password), timeout=20)
+            except Exception as exc:  # noqa: BLE001
+                if records and _is_rate_limited_exception(exc):
+                    break
+                raise
+            
+            values = data.get("values", [])
+            if not values:
+                break
+                
+            for commit in values:
+                commit_date = commit.get("date")
+                if since_date and commit_date:
+                    dt = normalize_record_datetime(commit_date)
+                    if dt and dt.date() < since_date:
+                        next_url = None
+                        break
+                records.append(commit)
+            
+            if next_url is not None:
+                next_url = data.get("next")
+        return records
+
     def list_developer_candidates(
         self,
         repository: RepositoryRef,
@@ -835,6 +923,50 @@ class GitHubProviderClient(ProviderClient):
                 if not self._is_date_in_range(commit_date, start_date, end_date):
                     continue
                 records.append(commit)
+            page += 1
+        return records
+
+    def list_pull_requests_for_commit(
+        self,
+        repository: RepositoryRef,
+        commit_hash: str,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        headers = self._headers()
+        # GitHub endpoint to list PRs associated with a commit
+        url = f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/commits/{commit_hash}/pulls"
+        try:
+            return _get_json_with_retry(url, headers=headers, timeout=20) or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def list_commits_for_file(
+        self,
+        repository: RepositoryRef,
+        file_path: str,
+        since_date: Optional[date] = None,
+        cancel_check: CancelCheck = None,
+    ) -> list[dict]:
+        headers = self._headers()
+        page = 1
+        records: list[dict] = []
+        params = {"per_page": 100, "page": page, "path": file_path}
+        if since_date:
+            params["since"] = f"{since_date.isoformat()}T00:00:00Z"
+
+        while True:
+            if _should_cancel(cancel_check):
+                break
+            params["page"] = page
+            values = _get_json_with_retry(
+                f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/commits",
+                params=params,
+                headers=headers,
+                timeout=20,
+            )
+            if not values:
+                break
+            records.extend(values)
             page += 1
         return records
 

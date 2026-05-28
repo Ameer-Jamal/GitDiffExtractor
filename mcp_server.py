@@ -308,12 +308,22 @@ class RepoLensMCPBackend:
         repositories_json: str = "",
     ) -> dict[str, Any]:
         scope_repositories = None
+        resolution_errors = []
         if repositories_json.strip():
-            scope_repositories = tuple(
-                RepositoryRef.from_dict(item)
-                for item in json.loads(repositories_json)
-                if isinstance(item, dict)
-            )
+            items = json.loads(repositories_json)
+            resolved = []
+            for item in items:
+                if isinstance(item, dict):
+                    resolved.append(RepositoryRef.from_dict(item))
+                elif isinstance(item, str) and item.strip():
+                    try:
+                        # Fuzzy resolve string repo names/slugs
+                        repo_dict = self.resolve_repository(slug=item.strip())
+                        resolved.append(RepositoryRef.from_dict(repo_dict))
+                    except ValueError:
+                        resolution_errors.append(f"Could not resolve repository: {item}")
+                        continue
+            scope_repositories = tuple(resolved)
 
         query = ContributionHistoryQuery(
             developer=developer,
@@ -329,6 +339,7 @@ class RepoLensMCPBackend:
             scope_repositories=scope_repositories,
         )
         result = self.history_service.execute_query(query)
+        all_errors = resolution_errors + result.partial_errors
         return {
             "scope": {
                 "scope_type": result.scope.scope_type,
@@ -343,12 +354,76 @@ class RepoLensMCPBackend:
                 }
                 for group, records in result.grouped_records
             ],
-            "partial_errors": result.partial_errors,
+            "partial_errors": all_errors,
             "total_prs": result.total_prs,
             "total_commits": result.total_commits,
             "active_repositories": list(result.active_repositories),
             "top_repositories": list(result.top_repositories),
             "ticket_prefixes": list(result.ticket_prefixes),
+            "diagnostic_info": {
+                "repositories_scanned_count": len(result.scope.repositories),
+                "repositories_scanned": [repo.display_name for repo in result.scope.repositories],
+                "resolution_errors": resolution_errors,
+            } if not result.records else {},
+        }
+
+    def find_pr_for_commit(
+        self,
+        *,
+        commit_hash: str,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo_ref = RepositoryRef.from_dict(repo)
+        prs = self.provider.list_pull_requests_for_commit(repo_ref, commit_hash)
+        return {
+            "repository": self._repo_identity(repo),
+            "commit_hash": commit_hash,
+            "pull_requests": prs,
+            "count": len(prs),
+        }
+
+    def search_contributions_by_ticket(
+        self,
+        *,
+        ticket: str,
+        scope_type: str = "all_repos",
+        contribution_type: str = "prs_and_commits",
+    ) -> dict[str, Any]:
+        ticket_id = self.pr_service.extract_ticket_id(ticket)
+        return self.query_contribution_history(
+            developer="",  # Search all developers
+            search_text=ticket_id,
+            scope_type=scope_type,
+            contribution_type=contribution_type,
+        )
+
+    def analyze_file_history(
+        self,
+        *,
+        file_path: str,
+        since_date: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo_ref = RepositoryRef.from_dict(repo)
+        result = self.history_service.execute_file_history_query(
+            repo_ref,
+            file_path,
+            since_date=_parse_date(since_date),
+        )
+        return {
+            "repository": self._repo_identity(repo),
+            "file_path": file_path,
+            "records": [record.to_dict() for record in result.records],
+            "total_prs": result.total_prs,
+            "total_commits": result.total_commits,
         }
 
     def list_developer_candidates(
@@ -696,6 +771,55 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             group_by=group_by,
             titles_only=titles_only,
             repositories_json=repositories_json,
+        )
+
+    @app.tool()
+    def find_pr_for_commit(
+        commit_hash: str,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        """Find the pull request(s) associated with a specific commit hash."""
+        return backend.find_pr_for_commit(
+            commit_hash=commit_hash,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+        )
+
+    @app.tool()
+    def search_contributions_by_ticket(
+        ticket: str,
+        scope_type: str = "all_repos",
+        contribution_type: str = "prs_and_commits",
+    ) -> dict[str, Any]:
+        """Search for PRs and commits across repositories for a specific ticket ID."""
+        return backend.search_contributions_by_ticket(
+            ticket=ticket,
+            scope_type=scope_type,
+            contribution_type=contribution_type,
+        )
+
+    @app.tool()
+    def analyze_file_history(
+        file_path: str,
+        since_date: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        """Analyze the history of a specific file, returning associated PRs and commits."""
+        return backend.analyze_file_history(
+            file_path=file_path,
+            since_date=since_date,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
         )
 
     @app.tool()

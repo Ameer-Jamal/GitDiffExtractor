@@ -190,6 +190,81 @@ class ContributionHistoryService:
             ticket_prefixes=self._top_ticket_prefixes(records),
         )
 
+    def execute_file_history_query(
+        self,
+        repository: RepositoryRef,
+        file_path: str,
+        since_date: Optional[date] = None,
+        cancel_token: Optional[CancelToken] = None,
+    ) -> ContributionHistoryResult:
+        self.provider.validate_credentials()
+        self._query_cache.clear()
+        self._pr_commit_cache.clear()
+
+        records: list[ContributionRecord] = []
+        represented_commits: set[str] = set()
+
+        # 1. Fetch commits for the file
+        commits = self.provider.list_commits_for_file(
+            repository,
+            file_path,
+            since_date=since_date,
+            cancel_check=cancel_token.is_cancelled if cancel_token else None,
+        )
+
+        for commit in commits:
+            if cancel_token and cancel_token.is_cancelled():
+                break
+            commit_record = self._map_commit_record(repository, commit)
+            records.append(commit_record)
+            
+            # 2. For each commit, find associated PRs
+            commit_hash = commit_record.commit_hash
+            prs = self.provider.list_pull_requests_for_commit(
+                repository,
+                commit_hash,
+                cancel_check=cancel_token.is_cancelled if cancel_token else None,
+            )
+            for pr in prs:
+                pr_record = self._map_pr_record(repository, pr)
+                records.append(pr_record)
+                # Link commit to this PR in dedupe set
+                represented_commits.add(
+                    f"{repository.provider}:{repository.full_name.lower()}:{commit_hash.lower()}"
+                )
+
+        records = self._deduplicate_records(
+            records,
+            represented_commits,
+            ContributionHistoryQuery(developer="", contribution_type="prs_and_commits")
+        )
+        records.sort(
+            key=lambda record: (
+                record.effective_date or datetime.min,
+                record.primary_text.lower(),
+            ),
+            reverse=True,
+        )
+
+        scope = ContributionScope(
+            scope_type="specific",
+            repositories=(repository,),
+            label=f"File history: {file_path} in {repository.display_name}",
+        )
+
+        return ContributionHistoryResult(
+            records=records,
+            repositories_scanned=(repository,),
+            scope=scope,
+            partial_errors=[],
+            grouped_records=[("All results", records)],
+            total_prs=sum(1 for record in records if record.record_type == "pr"),
+            total_commits=sum(1 for record in records if record.record_type == "commit"),
+            active_repositories=(repository.display_name,),
+            top_repositories=(repository.display_name,),
+            ticket_prefixes=self._top_ticket_prefixes(records),
+        )
+
     @staticmethod
     def _is_rate_limited_error(exc: Exception) -> bool:
         text = str(exc or "").lower()
