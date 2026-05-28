@@ -442,6 +442,76 @@ class RepoLensMCPBackend:
             "candidates": self.provider.list_developer_candidates(repo_ref, limit=limit),
         }
 
+    def resolve_pr_from_reference(self, reference: str) -> tuple[dict, dict]:
+        """Resolves a PR from a URL, ticket, or title fragment. Returns (repo, pr_metadata)."""
+        reference = reference.strip()
+        
+        # 1. Try URL
+        url_info = self.pr_service.parse_pr_url(reference)
+        if url_info:
+            repo = self.resolve_repository(
+                provider=url_info["provider"],
+                workspace=url_info["workspace"],
+                slug=url_info["slug"]
+            )
+            pr = self.pr_service.get_pull_request(repo, url_info["pr_id"])
+            return repo, pr
+
+        # 2. Try Ticket
+        ticket_id = self.pr_service.extract_ticket_id(reference)
+        if ticket_id:
+            # Search across selected repositories
+            selected = self.config.get_selected_repositories()
+            if not selected and self.config.get_active_repository():
+                selected = [self.config.get_active_repository()]
+            
+            prs = self.pr_service.find_pull_requests_by_ticket(selected, ticket_id)
+            if prs:
+                # If multiple, we take the most recent one for now
+                pr = prs[0]
+                repo = self.resolve_repository(
+                    provider=pr.get("provider"),
+                    slug=pr.get("repo_label").split("/")[-1] if "/" in pr.get("repo_label") else pr.get("repo_label")
+                )
+                return repo, pr
+
+        # 3. Try Search Text (Title/Branch)
+        selected = self.config.get_selected_repositories()
+        if not selected and self.config.get_active_repository():
+            selected = [self.config.get_active_repository()]
+            
+        for repo in selected:
+            prs, _ = self.pr_service.list_pull_requests_for_repo(repo, search_text=reference)
+            if prs:
+                return repo, prs[0]
+
+        raise ValueError(f"Could not resolve Pull Request from reference: {reference}")
+
+    def get_pr_context(
+        self,
+        *,
+        reference: str,
+        ensure_checkout: bool = True,
+        max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
+    ) -> dict[str, Any]:
+        """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
+        repo, pr = self.resolve_pr_from_reference(reference)
+        repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
+        result = self.diff_service.generate_pr_diff(pr, repo_dir)
+        diff_text, truncated = self._truncate_text(result.diff_text, _clamp_diff_limit(max_chars))
+        
+        return {
+            "repository": self._repo_identity(repo),
+            "pr": pr,
+            "repo_dir": repo_dir,
+            "diff_text": diff_text,
+            "truncated": truncated,
+            "merge_base": result.merge_base,
+            "source_commit": result.source_commit,
+            "destination_commit": result.destination_commit,
+            "merge_commit": result.merge_commit,
+        }
+
     def resolve_repository(self, *, provider: str = "", workspace: str = "", slug: str = "", scope: str = "") -> dict:
         desired_provider = (provider or self.config.get_provider() or "").lower()
         desired_workspace = (workspace or "").strip().lower()
@@ -820,6 +890,19 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+        )
+
+    @app.tool()
+    def get_pr_context(
+        reference: str,
+        ensure_checkout: bool = True,
+        max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
+    ) -> dict[str, Any]:
+        """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
+        return backend.get_pr_context(
+            reference=reference,
+            ensure_checkout=ensure_checkout,
+            max_chars=max_chars,
         )
 
     @app.tool()

@@ -104,3 +104,47 @@ def test_query_contribution_history_fuzzy_resolve(mock_backend):
         query = args[0]
         assert len(query.scope_repositories) == 1
         assert query.scope_repositories[0].slug == "mt-backend"
+
+def test_get_pr_context_url(mock_backend):
+    backend, provider = mock_backend
+    
+    # Mock resolve_repository to return a repo with clone_url
+    backend.resolve_repository.return_value = {
+        "provider": "bitbucket",
+        "owner": "etqdev",
+        "slug": "mt-db-migration",
+        "full_name": "etqdev/mt-db-migration",
+        "clone_url": "https://bitbucket.org/etqdev/mt-db-migration.git"
+    }
+    
+    # Mock parse_pr_url
+    with patch.object(backend.pr_service, "parse_pr_url") as mock_parse:
+        mock_parse.return_value = {
+            "provider": "bitbucket",
+            "workspace": "etqdev",
+            "slug": "mt-db-migration",
+            "pr_id": "778"
+        }
+        
+        # Mock get_pull_request
+        with patch.object(backend.pr_service, "get_pull_request") as mock_get_pr:
+            mock_get_pr.return_value = {"id": 778, "title": "DB Migration"}
+            
+            # Mock diff service and repo_dir
+            with patch.object(backend, "_repo_dir") as mock_repo_dir:
+                mock_repo_dir.return_value = "/tmp/repo"
+                with patch.object(backend.diff_service, "generate_pr_diff") as mock_diff:
+                    mock_diff.return_value = MagicMock(
+                        diff_text="diff content",
+                        merge_base="base",
+                        source_commit="src",
+                        destination_commit="dst",
+                        merge_commit="mrg"
+                    )
+                    
+                    result = backend.get_pr_context(reference="https://bitbucket.org/etqdev/mt-db-migration/pull-requests/778")
+                    
+                    assert result["pr"]["id"] == 778
+                    assert result["diff_text"] == "diff content"
+                    mock_parse.assert_called_once()
+                    mock_get_pr.assert_called_once()

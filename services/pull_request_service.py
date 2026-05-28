@@ -453,8 +453,7 @@ class PullRequestService:
             "provider": "github",
         }
 
-    @staticmethod
-    def _github_next_link(link_header: Optional[str]) -> Optional[str]:
+    def _github_next_link(self, link_header: Optional[str]) -> Optional[str]:
         if not link_header:
             return None
         for part in link_header.split(","):
@@ -463,4 +462,29 @@ class PullRequestService:
                 continue
             if section[1].strip() == 'rel="next"':
                 return section[0].strip().strip("<>")
+        return None
+
+    def parse_pr_url(self, url: str) -> Optional[dict[str, str]]:
+        """Parses a PR URL and returns a dict with provider, workspace, slug, and pr_id."""
+        url = url.strip()
+        # Bitbucket: https://bitbucket.org/{workspace}/{slug}/pull-requests/{id}
+        bb_match = re.search(r"bitbucket\.org/([^/]+)/([^/]+)/pull-requests/(\d+)", url)
+        if bb_match:
+            return {
+                "provider": "bitbucket",
+                "workspace": bb_match.group(1),
+                "slug": bb_match.group(2),
+                "pr_id": bb_match.group(3),
+            }
+        
+        # GitHub: https://github.com/{owner}/{repo}/pull/{id}
+        gh_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
+        if gh_match:
+            return {
+                "provider": "github",
+                "workspace": gh_match.group(1),
+                "slug": gh_match.group(2),
+                "pr_id": gh_match.group(3),
+            }
+        
         return None
