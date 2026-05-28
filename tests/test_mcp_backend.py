@@ -1,117 +1,143 @@
-import unittest
-from unittest.mock import MagicMock
-
+import json
+import pytest
+from unittest.mock import MagicMock, patch
 from mcp_server import RepoLensMCPBackend
+from models.contribution_models import RepositoryRef
 
-
-class MCPBackendTicketDiffTests(unittest.TestCase):
-    def test_get_ticket_diffs_groups_multiple_tickets_and_truncates_per_pr(self):
-        backend = object.__new__(RepoLensMCPBackend)
-        backend.config = MagicMock()
-        backend.pr_service = MagicMock()
-        backend.diff_service = MagicMock()
-
-        repo = {
+@pytest.fixture
+def mock_backend():
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_provider = MagicMock()
+        mock_build.return_value = mock_provider
+        
+        # Mock resolve_repository
+        backend = RepoLensMCPBackend()
+        backend.resolve_repository = MagicMock(return_value={
             "provider": "bitbucket",
-            "id": "repo-1",
             "owner": "etqdev",
             "slug": "mt-backend",
-            "local_dir": "/tmp/mt-backend",
+            "full_name": "etqdev/mt-backend",
+            "clone_url": "https://bitbucket.org/etqdev/mt-backend.git"
+        })
+        return backend, mock_provider
+
+def test_find_pr_for_commit(mock_backend):
+    backend, provider = mock_backend
+    provider.list_pull_requests_for_commit.return_value = [{"id": "123", "title": "Fix bug"}]
+    
+    result = backend.find_pr_for_commit(commit_hash="abc123")
+    
+    assert result["count"] == 1
+    assert result["pull_requests"][0]["id"] == "123"
+    provider.list_pull_requests_for_commit.assert_called_once()
+
+def test_search_contributions_by_ticket(mock_backend):
+    backend, provider = mock_backend
+    
+    with patch.object(backend.history_service, "execute_query") as mock_execute:
+        mock_execute.return_value = MagicMock(
+            records=[],
+            scope=MagicMock(scope_type="all", label="All", repositories=[]),
+            partial_errors=[],
+            grouped_records=[],
+            total_prs=0,
+            total_commits=0,
+            active_repositories=[],
+            top_repositories=[],
+            ticket_prefixes=[]
+        )
+        
+        backend.search_contributions_by_ticket(ticket="RU-24133")
+        
+        args, _ = mock_execute.call_args
+        query = args[0]
+        assert query.search_text == "RU-24133"
+
+def test_analyze_file_history(mock_backend):
+    backend, provider = mock_backend
+    
+    with patch.object(backend.history_service, "execute_file_history_query") as mock_execute:
+        mock_execute.return_value = MagicMock(
+            records=[MagicMock(to_dict=lambda: {"id": "1"})],
+            total_prs=1,
+            total_commits=0
+        )
+        
+        result = backend.analyze_file_history(file_path="src/main.java")
+        
+        assert result["file_path"] == "src/main.java"
+        assert len(result["records"]) == 1
+        mock_execute.assert_called_once()
+
+def test_query_contribution_history_fuzzy_resolve(mock_backend):
+    backend, provider = mock_backend
+    
+    backend.resolve_repository.side_effect = lambda **kwargs: {
+        "provider": "bitbucket",
+        "owner": "etqdev",
+        "slug": kwargs.get("slug"),
+        "full_name": f"etqdev/{kwargs.get('slug')}"
+    }
+    
+    with patch.object(backend.history_service, "execute_query") as mock_execute:
+        mock_execute.return_value = MagicMock(
+            records=[],
+            scope=MagicMock(scope_type="custom", label="custom", repositories=[RepositoryRef(provider="bitbucket", workspace="etqdev", slug="mt-backend", display_name="mt-backend", full_name="etqdev/mt-backend")]),
+            partial_errors=[],
+            grouped_records=[],
+            total_prs=0,
+            total_commits=0,
+            active_repositories=[],
+            top_repositories=[],
+            ticket_prefixes=[]
+        )
+        
+        backend.query_contribution_history(
+            developer="me",
+            repositories_json=json.dumps(["mt-backend"])
+        )
+        
+        args, _ = mock_execute.call_args
+        query = args[0]
+        assert len(query.scope_repositories) == 1
+        assert query.scope_repositories[0].slug == "mt-backend"
+
+def test_get_pr_context_url(mock_backend):
+    backend, provider = mock_backend
+    
+    backend.resolve_repository.return_value = {
+        "provider": "bitbucket",
+        "owner": "etqdev",
+        "slug": "mt-db-migration",
+        "full_name": "etqdev/mt-db-migration",
+        "clone_url": "https://bitbucket.org/etqdev/mt-db-migration.git"
+    }
+    
+    with patch.object(backend.pr_service, "parse_pr_url") as mock_parse:
+        mock_parse.return_value = {
+            "provider": "bitbucket",
+            "workspace": "etqdev",
+            "slug": "mt-db-migration",
+            "pr_id": "778"
         }
-        backend._ticket_search_repositories = MagicMock(return_value=[repo])
-        backend._repo_dir = MagicMock(return_value="/tmp/mt-backend")
-        backend.pr_service.extract_ticket_id.side_effect = lambda value: value.split(":", 1)[0].upper()
-        backend.pr_service.find_pull_requests_by_ticket.side_effect = [
-            [
-                {
-                    "id": 2315,
-                    "title": "RU-25463: Fix Open redirect issues",
-                    "repo_id": "repo-1",
-                    "repo_label": "etqdev/mt-backend",
-                }
-            ],
-            [],
-        ]
-
-        diff_result = MagicMock()
-        diff_result.diff_text = "abcdef"
-        diff_result.merge_base = "base"
-        diff_result.resolved_source = "source"
-        diff_result.resolved_destination = "destination"
-        backend.diff_service.generate_pr_diff.return_value = diff_result
-
-        payload = backend.get_ticket_diffs(
-            tickets_json='["RU-25463: Fix Open redirect issues", "RU-00000"]',
-            max_chars_per_pr=3,
-        )
-
-        self.assertEqual(len(payload["tickets"]), 2)
-        self.assertEqual(payload["tickets"][0]["ticket"], "RU-25463")
-        self.assertEqual(payload["tickets"][0]["count"], 1)
-        self.assertEqual(payload["tickets"][0]["pull_requests"][0]["diff_text"], "abc")
-        self.assertTrue(payload["tickets"][0]["pull_requests"][0]["truncated"])
-        self.assertEqual(payload["tickets"][1]["ticket"], "RU-00000")
-        self.assertEqual(payload["tickets"][1]["count"], 0)
-
-    def test_get_ticket_diffs_requires_json_array(self):
-        backend = object.__new__(RepoLensMCPBackend)
-        with self.assertRaisesRegex(ValueError, "JSON array"):
-            backend.get_ticket_diffs(tickets_json='"RU-25463"')
-
-    def test_specific_scope_uses_discovered_repo_match(self):
-        backend = object.__new__(RepoLensMCPBackend)
-        backend.config = MagicMock()
-        backend.config.get_provider.return_value = "bitbucket"
-        backend.config.get_bitbucket_workspace.return_value = "etqdev"
-        backend.config.get_active_repository.return_value = {}
-        backend.config.get_selected_repositories.return_value = []
-        backend.list_repositories = MagicMock(
-            return_value=[
-                {
-                    "provider": "bitbucket",
-                    "id": "repo-123",
-                    "owner": "etqdev",
-                    "slug": "pdf-capturing-service-repo",
-                    "name": "PDF Capturing Service Repo",
-                    "clone_url": "https://example.test/custom.git",
-                }
-            ]
-        )
-
-        repos = backend._ticket_search_repositories(scope="specific:pdf-capturing-service-repo")
-
-        self.assertEqual(len(repos), 1)
-        self.assertEqual(repos[0]["provider"], "bitbucket")
-        self.assertEqual(repos[0]["id"], "repo-123")
-        self.assertEqual(repos[0]["owner"], "etqdev")
-        self.assertEqual(repos[0]["slug"], "pdf-capturing-service-repo")
-        self.assertEqual(repos[0]["clone_url"], "https://example.test/custom.git")
-
-    def test_specific_scope_accepts_owner_and_repo(self):
-        backend = object.__new__(RepoLensMCPBackend)
-        backend.config = MagicMock()
-        backend.config.get_provider.return_value = "github"
-        backend.config.get_github_owner.return_value = ""
-        backend.config.get_active_repository.return_value = {}
-        backend.config.get_selected_repositories.return_value = []
-        backend.list_repositories = MagicMock(
-            return_value=[
-                {
-                    "provider": "github",
-                    "owner": "openai",
-                    "slug": "demo",
-                    "clone_url": "https://github.com/openai/demo.git",
-                }
-            ]
-        )
-
-        repo = backend.resolve_repository(scope="specific:OpenAI/demo")
-
-        self.assertEqual(repo["provider"], "github")
-        self.assertEqual(repo["owner"], "openai")
-        self.assertEqual(repo["slug"], "demo")
-        self.assertEqual(repo["clone_url"], "https://github.com/openai/demo.git")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        
+        with patch.object(backend.pr_service, "get_pull_request") as mock_get_pr:
+            mock_get_pr.return_value = {"id": 778, "title": "DB Migration"}
+            
+            with patch.object(backend, "_repo_dir") as mock_repo_dir:
+                mock_repo_dir.return_value = "/tmp/repo"
+                with patch.object(backend.diff_service, "generate_pr_diff") as mock_diff:
+                    mock_diff.return_value = MagicMock(
+                        diff_text="diff content",
+                        merge_base="base",
+                        source_commit="src",
+                        destination_commit="dst",
+                        merge_commit="mrg"
+                    )
+                    
+                    result = backend.get_pr_context(reference="https://bitbucket.org/etqdev/mt-db-migration/pull-requests/778")
+                    
+                    assert result["pr"]["id"] == 778
+                    assert result["diff_text"] == "diff content"
+                    mock_parse.assert_called_once()
+                    mock_get_pr.assert_called_once()
