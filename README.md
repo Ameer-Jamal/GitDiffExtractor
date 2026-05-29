@@ -102,58 +102,116 @@ You do not need to reinstall/register the MCP server after code changes when the
 
 ### **Connect your AI agent**
 
-Follow the applicable instructions to connect the **RepoLens MCP**. Use the absolute path to `mcp_server.py`: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`.
+The fastest path is to run the included installer:
+
+```bash
+pip install -r requirements.txt
+python3 install_mcp.py
+```
+
+By default, the installer attempts all supported clients, updates what it can automatically, and tells you to fall back to this README for anything it cannot configure.
+
+Useful examples:
+
+```bash
+python3 install_mcp.py --client codex --client cursor
+python3 install_mcp.py --client cursor --cursor-scope project
+python3 install_mcp.py --list-clients
+```
+
+If you prefer manual setup, or the installer cannot configure your client automatically, use the instructions below.
+
+Before registering the server manually, install the Python dependencies and determine the absolute path to `mcp_server.py`.
+
+From the RepoLens project root:
+
+```bash
+pip install -r requirements.txt
+python3 -c "from pathlib import Path; print(Path('mcp_server.py').resolve())"
+```
+
+In the examples below, replace `<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py` with that resolved path.
 
 #### **Claude Code**
-Run this command in your terminal:
+
+Claude Code's current MCP docs use `add-json` for local `stdio` servers:
+
 ```bash
-claude mcp add repolens --command "python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"
+claude mcp add-json repolens '{"type":"stdio","command":"python3","args":["<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py"]}'
 ```
-- Enter `/mcp` in Claude Code
-- Select **repolens** and authenticate
+
+Then run `claude mcp list` or `/mcp` in Claude Code to confirm the server is available.
 
 #### **Claude Desktop**
-- Go to **Settings** → **Connectors** → **Add custom connector**
-- Alternatively, edit your `claude_desktop_config.json`:
+
+Add RepoLens to `claude_desktop_config.json`:
+
 ```json
 {
   "mcpServers": {
     "repolens": {
       "command": "python3",
-      "args": ["/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"]
+      "args": ["<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py"]
     }
   }
 }
 ```
 
-#### **ChatGPT**
-- Turn on **Developer Mode**
-- Go to **Settings** → **Apps** → **Create app**
-- Provide the command (`python3`) and args (path to `mcp_server.py`)
+Restart Claude Desktop after saving the config.
 
 #### **Codex CLI**
-Run this command in your terminal:
-```bash
-codex mcp add repolens -- python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py
-```
-- Enter `/mcp` in Codex CLI to list available tools.
 
-#### **Gemini CLI**
-Run this command in your terminal:
 ```bash
-gemini mcp add repolens python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py
+codex mcp add repolens -- python3 <ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py
 ```
-- Enter `/mcp list` in Gemini CLI to verify the connection.
+
+Verify with:
+
+```bash
+codex mcp list
+```
+
+If you use the Codex IDE extension, it shares the same MCP configuration as the CLI.
 
 #### **Cursor**
-- Go to **Settings** → **Cursor Settings**
-- Select **Tools & MCPs** → **Connect**
-- Set **Name**: `repoLens`, **Type**: `command`, **Command**: `python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
-#### **Other platforms**
-You can connect to RepoLens on any platform that supports the **Model Context Protocol** via local `stdio` transport. Use:
+Cursor supports local MCP servers through `.cursor/mcp.json` in the project or `~/.cursor/mcp.json` globally:
+
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "python3",
+      "args": ["<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py"]
+    }
+  }
+}
+```
+
+Restart Cursor after saving the file.
+
+#### **Gemini CLI**
+
+```bash
+gemini mcp add repolens python3 <ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py
+```
+
+Verify with:
+
+```bash
+gemini mcp list
+```
+
+#### **ChatGPT**
+
+ChatGPT cannot connect directly to a local `stdio` MCP server. As of May 29, 2026, OpenAI documents custom MCP apps as remote connectors only. If you want to use RepoLens with ChatGPT, you need to expose it through a supported remote transport such as OpenAI's Secure MCP Tunnel instead of pointing ChatGPT at `python3 mcp_server.py`.
+
+#### **Other MCP clients**
+
+Use a local `stdio` server configuration with:
+
 - **Command**: `python3`
-- **Arguments**: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
+- **Arguments**: `<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py`
 
 ### **Environment Variable Overrides**
 
@@ -184,7 +242,7 @@ REPOLENS_PROVIDER=bitbucket \
 REPOLENS_BITBUCKET_USERNAME=your-username \
 REPOLENS_BITBUCKET_APP_PASSWORD=your-app-password \
 REPOLENS_BITBUCKET_WORKSPACE=your-workspace \
-python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py
+python3 <ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py
 ```
 
 ---
