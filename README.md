@@ -102,25 +102,46 @@ You do not need to reinstall/register the MCP server after code changes when the
 
 ### **Register The Local Server**
 
-Example registration command for an MCP client that supports a command plus args:
+Below are instructions for connecting the **RepoLens MCP** to popular AI platforms. Use the absolute path to `mcp_server.py`: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`.
 
+#### **Claude Code**
+Run this command in your terminal:
 ```bash
-python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py
+claude mcp add repolens --command "python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"
+```
+Then enter `/mcp` in Claude Code to verify and authenticate.
+
+#### **Claude Desktop**
+1. Go to **Settings** → **Connectors** → **Add custom connector**.
+2. Alternatively, edit your `claude_desktop_config.json` (usually in `~/Library/Application Support/Claude/` on macOS):
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "python3",
+      "args": ["/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"]
+    }
+  }
+}
 ```
 
-If your client has a CLI for MCP registration, use `repoLens` as the server name and point it at:
+#### **Cursor**
+1. Go to **Settings** → **Cursor Settings**.
+2. Select **Tools & MCPs** → **Connect**.
+3. Choose `command` (stdio) as the transport.
+4. Name: `repoLens`
+5. Command: `python3`
+6. Arguments: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
-```text
-/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py
-```
+#### **ChatGPT**
+1. Turn on **Developer Mode**.
+2. Go to **Settings** → **Apps** → **Create app**.
+3. Provide the command and arguments for the RepoLens server.
 
-For clients that use JSON or TOML config, the shape is generally:
-
-```toml
-[mcp_servers.repoLens]
-command = "python3"
-args = ["/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"]
-```
+#### **Other platforms**
+You can connect to RepoLens on any platform that supports the **Model Context Protocol** via local `stdio` transport. Just point the client at:
+- **Command**: `python3`
+- **Arguments**: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
 ### **Environment Variable Overrides**
 
