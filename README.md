@@ -100,20 +100,21 @@ Typical flow:
 
 You do not need to reinstall/register the MCP server after code changes when the command path stays the same. You do need to restart the MCP client so it reloads the server process and tool definitions.
 
-### **Register The Local Server**
+### **Connect your AI agent**
 
-Below are instructions for connecting the **RepoLens MCP** to popular AI platforms. Use the absolute path to `mcp_server.py`: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`.
+Follow the applicable instructions to connect the **RepoLens MCP**. Use the absolute path to `mcp_server.py`: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`.
 
 #### **Claude Code**
 Run this command in your terminal:
 ```bash
 claude mcp add repolens --command "python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"
 ```
-Then enter `/mcp` in Claude Code to verify and authenticate.
+- Enter `/mcp` in Claude Code
+- Select **repolens** and authenticate
 
 #### **Claude Desktop**
-1. Go to **Settings** → **Connectors** → **Add custom connector**.
-2. Alternatively, edit your `claude_desktop_config.json` (usually in `~/Library/Application Support/Claude/` on macOS):
+- Go to **Settings** → **Connectors** → **Add custom connector**
+- Alternatively, edit your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
@@ -125,21 +126,31 @@ Then enter `/mcp` in Claude Code to verify and authenticate.
 }
 ```
 
-#### **Cursor**
-1. Go to **Settings** → **Cursor Settings**.
-2. Select **Tools & MCPs** → **Connect**.
-3. Choose `command` (stdio) as the transport.
-4. Name: `repoLens`
-5. Command: `python3`
-6. Arguments: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
-
 #### **ChatGPT**
-1. Turn on **Developer Mode**.
-2. Go to **Settings** → **Apps** → **Create app**.
-3. Provide the command and arguments for the RepoLens server.
+- Turn on **Developer Mode**
+- Go to **Settings** → **Apps** → **Create app**
+- Provide the command (`python3`) and args (path to `mcp_server.py`)
+
+#### **Codex**
+- Go to **Settings** → **MCP servers**
+- Select **Streamable stdio**
+- Provide the command and absolute path to `mcp_server.py`
+
+#### **Codex CLI**
+Run this command in your terminal:
+```bash
+codex mcp add repolens --command "python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py"
+```
+- Enter `/mcp` in Codex CLI
+- Select **repolens**
+
+#### **Cursor**
+- Go to **Settings** → **Cursor Settings**
+- Select **Tools & MCPs** → **Connect**
+- Set **Name**: `repoLens`, **Type**: `command`, **Command**: `python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
 #### **Other platforms**
-You can connect to RepoLens on any platform that supports the **Model Context Protocol** via local `stdio` transport. Just point the client at:
+You can connect to RepoLens on any platform that supports the **Model Context Protocol** via local `stdio` transport. Use:
 - **Command**: `python3`
 - **Arguments**: `/Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
