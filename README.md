@@ -149,6 +149,11 @@ codex mcp add repolens --command "python3 /Users/ajamal/Documents/PythonProjects
 - Select **Tools & MCPs** → **Connect**
 - Set **Name**: `repoLens`, **Type**: `command`, **Command**: `python3 /Users/ajamal/Documents/PythonProjects/RepoLens/mcp_server.py`
 
+#### **Gemini**
+- You can connect RepoLens to any **Gemini-powered** client that supports MCP.
+- For **Gemini CLI** (like the one you are chatting with), the server is automatically detected if started from the project root.
+- For other Gemini interfaces, provide the absolute path to `mcp_server.py` using the `stdio` transport.
+
 #### **Other platforms**
 You can connect to RepoLens on any platform that supports the **Model Context Protocol** via local `stdio` transport. Use:
 - **Command**: `python3`
