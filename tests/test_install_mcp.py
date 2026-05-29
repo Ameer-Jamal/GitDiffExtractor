@@ -93,3 +93,13 @@ def test_claude_desktop_config_path_darwin():
     with patch("install_mcp.platform.system", return_value="Darwin"):
         path = install_mcp.claude_desktop_config_path()
     assert str(path).endswith("Library/Application Support/Claude/claude_desktop_config.json")
+
+
+def test_default_python_command_prefers_current_interpreter():
+    with patch("install_mcp.sys.executable", "/tmp/venv/bin/python"), patch("install_mcp.shutil.which", return_value="/usr/bin/python3"):
+        assert install_mcp.default_python_command() == "/tmp/venv/bin/python"
+
+
+def test_default_python_command_falls_back_to_python_binaries():
+    with patch("install_mcp.sys.executable", ""), patch("install_mcp.shutil.which", side_effect=[None, "C:/Python311/python.exe"]):
+        assert install_mcp.default_python_command() == "C:/Python311/python.exe"

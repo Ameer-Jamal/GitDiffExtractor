@@ -102,14 +102,25 @@ You do not need to reinstall/register the MCP server after code changes when the
 
 ### **Connect your AI agent**
 
-The fastest path is to run the included installer:
+The fastest path is to run the included installer.
+
+macOS:
 
 ```bash
 pip install -r requirements.txt
 python3 install_mcp.py
 ```
 
+Windows:
+
+```powershell
+pip install -r requirements.txt
+py install_mcp.py
+```
+
 By default, the installer attempts all supported clients, updates what it can automatically, and tells you to fall back to this README for anything it cannot configure.
+
+The installer uses the exact Python interpreter that launched it, which makes the generated MCP configuration work correctly for both macOS and Windows, including virtual environments.
 
 Useful examples:
 
@@ -117,6 +128,14 @@ Useful examples:
 python3 install_mcp.py --client codex --client cursor
 python3 install_mcp.py --client cursor --cursor-scope project
 python3 install_mcp.py --list-clients
+```
+
+Windows equivalents:
+
+```powershell
+py install_mcp.py --client codex --client cursor
+py install_mcp.py --client cursor --cursor-scope project
+py install_mcp.py --list-clients
 ```
 
 If you prefer manual setup, or the installer cannot configure your client automatically, use the instructions below.

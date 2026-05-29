@@ -45,7 +45,9 @@ def readme_path() -> Path:
 
 
 def default_python_command() -> str:
-    return shutil.which("python3") or sys.executable or "python3"
+    if sys.executable:
+        return sys.executable
+    return shutil.which("python3") or shutil.which("python") or "python3"
 
 
 def build_stdio_entry(python_cmd: str, script_path: Path) -> dict[str, Any]:
