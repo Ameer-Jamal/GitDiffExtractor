@@ -90,10 +90,10 @@ class ContributionHistoryServiceTests(unittest.TestCase):
     def setUp(self):
         repo = RepositoryRef(
             provider="bitbucket",
-            workspace="etqdev",
-            slug="mt-backend",
-            display_name="etqdev/mt-backend",
-            full_name="etqdev/mt-backend",
+            workspace="example-workspace",
+            slug="backend-service",
+            display_name="example-workspace/backend-service",
+            full_name="example-workspace/backend-service",
         )
         self.provider = _FakeProvider()
         self.service = ContributionHistoryService(self.provider, _FakeScopeManager(repo))
@@ -129,7 +129,7 @@ class ContributionHistoryServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(result.grouped_records), 1)
-        self.assertEqual(result.grouped_records[0][0], "etqdev/mt-backend")
+        self.assertEqual(result.grouped_records[0][0], "example-workspace/backend-service")
 
     def test_merged_prs_only_skips_pr_commit_lookup(self):
         result = self.service.execute_query(

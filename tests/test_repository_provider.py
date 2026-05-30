@@ -6,7 +6,7 @@ from services.RepositoryProvider import RepositoryProvider, RepositoryProviderEr
 
 class RepositoryProviderTests(unittest.TestCase):
     def test_inject_basic_auth_replaces_existing_userinfo(self):
-        url = "https://olduser@bitbucket.org/etqdev/mt-frontend.git"
+        url = "https://olduser@bitbucket.org/example-workspace/frontend-service.git"
         out = RepositoryProvider._inject_basic_auth(url, "newuser", "p@ss word")
         self.assertTrue(out.startswith("https://newuser:p%40ss%20word@bitbucket.org/"))
         self.assertNotIn("olduser@", out)
@@ -20,9 +20,9 @@ class RepositoryProviderTests(unittest.TestCase):
 
     def test_discovery_context_key_bitbucket(self):
         key = RepositoryProvider.discovery_context_key(
-            "bitbucket", {"workspace": "EtQDev"}
+            "bitbucket", {"workspace": "Example-Workspace"}
         )
-        self.assertEqual(key, "etqdev")
+        self.assertEqual(key, "example-workspace")
 
     def test_discovery_context_key_github(self):
         key = RepositoryProvider.discovery_context_key(

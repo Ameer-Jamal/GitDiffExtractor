@@ -30,6 +30,7 @@ Git providers already contain the context an AI needs, but that context is scatt
 5. **Contribution History**: Query merged PRs, commits, or both by developer, date range, repository scope, branch, and text. Export results to CSV, JSON, or Markdown.
 
 6. **MCP Server Mode**: Expose repository discovery, selected repositories, PR lookup, ticket lookup, diffs, and contribution history as local MCP tools for AI clients.
+7. **PR Creation for AI Agents**: Create GitHub or Bitbucket pull requests from already-pushed source branches through the desktop app or MCP.
 
 ---
 
@@ -88,6 +89,16 @@ The MCP server is read-only for provider data. It may clone or fetch local repos
 - `analyze_file_history` (Unified commit and PR history for a specific file)
 - `get_pr_context` (Unified tool to get PR metadata and diff from a URL, ticket, or title)
 - `list_developer_candidates`
+- `create_pull_request` (Create one GitHub or Bitbucket PR from an existing remote branch)
+- `get_git_repository_context` (Infer provider, repository, remote, branch, and auth context from a local Git checkout)
+
+For AI-driven PR creation, a good workflow is:
+
+1. Use normal Git commands to create a focused branch, commit changes, and push that branch.
+2. Call `get_git_repository_context` with the checkout path and branch names to confirm provider/repository context and remote branch availability.
+3. Call `create_pull_request` with `source_branch`, `target_branch`, `title`, `description`, and either explicit `provider`/`workspace`/`slug` or `repo_dir`.
+
+`create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME`, and `REPOLENS_BITBUCKET_APP_PASSWORD` over relying on the desktop app's currently selected repository.
 
 ### **General Setup**
 

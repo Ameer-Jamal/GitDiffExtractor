@@ -1,7 +1,6 @@
 import os
 import subprocess
 import time
-import requests
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -18,8 +17,10 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QToolButton,
     QFileDialog,
+    QCheckBox,
 )
 
+from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService
 from ui.FilterableBranchSelector import FilterableBranchSelector
 
 
@@ -30,6 +31,7 @@ class CreatePRTab(QWidget):
         super().__init__()
         self.config = config_manager
         self.task_runner = task_runner
+        self.pr_creation_service = PullRequestCreationService(self.config)
         self._last_auto_refresh_repo = ""
         self._last_auto_refresh_ts = 0.0
         self._build_ui()
@@ -76,9 +78,9 @@ class CreatePRTab(QWidget):
         repo_select_row.addWidget(self.repo_combo, 1)
         repo_select_row.addWidget(
             self._info_button(
-                "Choose which selected Bitbucket repository receives the pull request. "
-                "Credentials come from Settings. Workspace and slug come from the selected repository. "
-                "This tab only creates a Bitbucket PR from one existing remote branch into another."
+                "Choose which selected repository receives the pull request. "
+                "Credentials come from Settings. Owner/workspace and slug come from the selected repository. "
+                "This tab only creates a PR from one existing remote branch into another."
             )
         )
         repo_form.addRow("Repository:", repo_select_row)
@@ -141,15 +143,15 @@ class CreatePRTab(QWidget):
         pr_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         pr_help_row = QHBoxLayout()
-        pr_help_label = QLabel("Creates a Bitbucket PR from one existing branch into another.")
+        pr_help_label = QLabel("Creates a GitHub or Bitbucket PR from one existing branch into another.")
         pr_help_label.setWordWrap(True)
         pr_help_row.addWidget(pr_help_label, 1)
         pr_help_row.addWidget(
             self._info_button(
-                "This only creates a pull request record in Bitbucket. "
+                "This only creates a pull request record with the provider. "
                 "It does not commit, push, merge, rebase, modify files, or change your local repository. "
                 "Your work must already be committed and pushed to the selected source branch. "
-                "If the source and target branches have conflicts, Bitbucket will show that on the PR."
+                "If the source and target branches have conflicts, the provider will show that on the PR."
             )
         )
         pr_form.addRow(pr_help_row)
@@ -166,6 +168,9 @@ class CreatePRTab(QWidget):
         self.pr_description.setFixedHeight(160)
         self.pr_description.textChanged.connect(self._store_pr_description)
         pr_form.addRow("Description:", self.pr_description)
+
+        self.draft_checkbox = QCheckBox("Create as draft when supported", self)
+        pr_form.addRow("Draft:", self.draft_checkbox)
 
         main.addWidget(pr_group)
 
@@ -321,54 +326,41 @@ class CreatePRTab(QWidget):
             QMessageBox.warning(self, "Selection Required", "Select a repository first.")
             return
 
-        username = self.config.get_bitbucket_username().strip()
-        password = self.config.get_bitbucket_app_password().strip()
-        workspace = (selected_repo.get("owner") or self.config.get_bitbucket_workspace()).strip()
-        slug = (selected_repo.get("slug") or selected_repo.get("name") or "").strip()
         source = self.src_selector.current_text().replace("origin/", "").strip()
         target = self.dst_selector.current_text().replace("origin/", "").strip()
         title = self.pr_title.text().strip()
         description = self.pr_description.toPlainText().strip()
 
-        if not username or not password:
-            QMessageBox.warning(
-                self,
-                "Credentials Required",
-                "Bitbucket username and app password are required. Update them in Settings.",
-            )
-            return
-
-        if not all((workspace, slug, source, target, title)):
+        if not all(((selected_repo.get("owner") or "").strip(), (selected_repo.get("slug") or selected_repo.get("name") or "").strip(), source, target, title)):
             QMessageBox.warning(
                 self,
                 "Input Error",
                 "Repository, source branch, target branch, and title are required.",
             )
             return
-
-        url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests"
-        payload = {
-            "title": title,
-            "description": description,
-            "source": {"branch": {"name": source}},
-            "destination": {"branch": {"name": target}},
-            "close_source_branch": False,
-        }
+        request = PullRequestCreateRequest(
+            title=title,
+            description=description,
+            source_branch=source,
+            target_branch=target,
+            draft=self.draft_checkbox.isChecked(),
+        )
 
         if not self.task_runner:
-            self._create_pr_sync(url, username, password, payload)
+            self._create_pr_sync(selected_repo, request)
             return
 
         self._set_create_state(True)
 
         def task():
-            response = requests.post(url, auth=(username, password), json=payload, timeout=15)
-            response.raise_for_status()
-            link = response.json()["links"]["html"]["href"]
-            return link
+            return self.pr_creation_service.create_pull_request(selected_repo, request)
 
-        def on_success(link):
-            QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
+        def on_success(result):
+            message = f"Pull request created:\n{result.get('url') or '(no URL returned)'}"
+            warnings = result.get("warnings") or []
+            if warnings:
+                message += "\n\nWarnings:\n- " + "\n- ".join(str(item) for item in warnings)
+            QMessageBox.information(self, "PR Created", message)
 
         def on_error(exc: Exception):
             QMessageBox.critical(self, "Error", f"Failed to create PR:\n{exc}")
@@ -502,12 +494,14 @@ class CreatePRTab(QWidget):
         self.create_btn.setText("Creating..." if busy else self._create_btn_label)
         self.create_btn.setEnabled(not busy and self._selected_repo() is not None)
 
-    def _create_pr_sync(self, url, username, password, payload):
+    def _create_pr_sync(self, selected_repo, request: PullRequestCreateRequest):
         try:
-            response = requests.post(url, auth=(username, password), json=payload, timeout=15)
-            response.raise_for_status()
-            link = response.json()["links"]["html"]["href"]
-            QMessageBox.information(self, "PR Created", f"Pull request created:\n{link}")
+            result = self.pr_creation_service.create_pull_request(selected_repo, request)
+            message = f"Pull request created:\n{result.get('url') or '(no URL returned)'}"
+            warnings = result.get("warnings") or []
+            if warnings:
+                message += "\n\nWarnings:\n- " + "\n- ".join(str(item) for item in warnings)
+            QMessageBox.information(self, "PR Created", message)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Error", f"Failed to create PR:\n{exc}")
 

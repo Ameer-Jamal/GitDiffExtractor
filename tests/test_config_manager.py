@@ -30,17 +30,17 @@ class ConfigManagerTests(unittest.TestCase):
     def test_selected_repositories_roundtrip(self):
         cfg = TestConfigManager()
         repos = [
-            {"id": "1", "owner": "etqdev", "slug": "mt-backend"},
-            {"id": "2", "owner": "etqdev", "slug": "mt-frontend"},
+            {"id": "1", "owner": "example-workspace", "slug": "backend-service"},
+            {"id": "2", "owner": "example-workspace", "slug": "frontend-service"},
         ]
         cfg.set_selected_repositories(repos)
         self.assertEqual(cfg.get_selected_repositories(), repos)
 
     def test_cached_discovery_roundtrip(self):
         cfg = TestConfigManager()
-        repos = [{"id": "1", "owner": "etqdev", "slug": "mt-backend"}]
-        cfg.set_cached_discovered_repositories("bitbucket", "etqdev", repos)
-        cached, ts = cfg.get_cached_discovered_repositories("bitbucket", "etqdev")
+        repos = [{"id": "1", "owner": "example-workspace", "slug": "backend-service"}]
+        cfg.set_cached_discovered_repositories("bitbucket", "example-workspace", repos)
+        cached, ts = cfg.get_cached_discovered_repositories("bitbucket", "example-workspace")
         self.assertEqual(cached, repos)
         self.assertGreater(ts, 0.0)
 

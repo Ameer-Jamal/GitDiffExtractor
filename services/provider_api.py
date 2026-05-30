@@ -197,6 +197,23 @@ class ProviderClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def branch_exists(self, repository: RepositoryRef, branch_name: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_pull_request(
+        self,
+        repository: RepositoryRef,
+        *,
+        title: str,
+        description: str,
+        source_branch: str,
+        target_branch: str,
+        draft: bool = False,
+    ) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
     def context_key(self) -> str:
         raise NotImplementedError
 
@@ -678,6 +695,48 @@ class BitbucketProviderClient(ProviderClient):
                 break
         return candidates
 
+    def branch_exists(self, repository: RepositoryRef, branch_name: str) -> bool:
+        username, password = self._auth()
+        branch = (branch_name or "").strip()
+        if not branch:
+            return False
+        url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{repository.workspace}/{repository.slug}/refs/branches/{requests.utils.quote(branch, safe='')}"
+        )
+        response = requests.get(url, auth=(username, password), timeout=20)
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return True
+
+    def create_pull_request(
+        self,
+        repository: RepositoryRef,
+        *,
+        title: str,
+        description: str,
+        source_branch: str,
+        target_branch: str,
+        draft: bool = False,
+    ) -> dict:
+        username, password = self._auth()
+        url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{repository.workspace}/{repository.slug}/pullrequests"
+        )
+        payload = {
+            "title": title,
+            "description": description,
+            "source": {"branch": {"name": source_branch}},
+            "destination": {"branch": {"name": target_branch}},
+            "close_source_branch": False,
+            "draft": draft,
+        }
+        response = requests.post(url, auth=(username, password), json=payload, timeout=20)
+        response.raise_for_status()
+        return response.json()
+
 
 class GitHubProviderClient(ProviderClient):
     provider_name = "github"
@@ -1008,9 +1067,53 @@ class GitHubProviderClient(ProviderClient):
                 break
         return candidates
 
+    def branch_exists(self, repository: RepositoryRef, branch_name: str) -> bool:
+        branch = (branch_name or "").strip()
+        if not branch:
+            return False
+        response = requests.get(
+            f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/branches/{requests.utils.quote(branch, safe='')}",
+            headers=self._headers(),
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return True
+
+    def create_pull_request(
+        self,
+        repository: RepositoryRef,
+        *,
+        title: str,
+        description: str,
+        source_branch: str,
+        target_branch: str,
+        draft: bool = False,
+    ) -> dict:
+        response = requests.post(
+            f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/pulls",
+            headers=self._headers(),
+            json={
+                "title": title,
+                "body": description,
+                "head": source_branch,
+                "base": target_branch,
+                "draft": draft,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 def build_provider_client(config: ConfigManager) -> ProviderClient:
     provider = (config.get_provider() or "bitbucket").lower()
+    return build_provider_client_for_name(provider, config)
+
+
+def build_provider_client_for_name(provider: str, config: ConfigManager) -> ProviderClient:
+    provider = (provider or "bitbucket").lower()
     if provider == "github":
         return GitHubProviderClient(config)
     return BitbucketProviderClient(config)

@@ -25,7 +25,7 @@ from services.RepositoryProvider import RepositoryProvider
 from ui.SettingsTab import SettingsTab
 from ui.TaskRunner import TaskRunner
 
-DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'etqdev').strip() or 'etqdev'
+DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'example-workspace').strip() or 'example-workspace'
 
 # CONSTS:
 INPUT_ERROR = "Input Error"
@@ -709,7 +709,7 @@ class RepoLens(QWidget):
             self.config_manager.clear_active_repository()
             self.config_manager.set_selected_repositories([])
             self.settings_tab.clear_pending_repository_selection()
-        self.create_pr_tab.setEnabled(provider == 'bitbucket')
+        self.create_pr_tab.setEnabled(provider in {'bitbucket', 'github'})
         self._pr_cache.clear()
         self.prs = []
         self.pr_list.clear()
@@ -1322,7 +1322,7 @@ class RepoLens(QWidget):
         self.branch_viewer.apply_repo_config()
         self.create_pr_tab.apply_repo_config()
         provider = (self.config_manager.get_provider() or 'bitbucket').lower()
-        self.create_pr_tab.setEnabled(provider == 'bitbucket')
+        self.create_pr_tab.setEnabled(provider in {'bitbucket', 'github'})
         self._refresh_pr_developer_suggestions()
 
     @staticmethod
