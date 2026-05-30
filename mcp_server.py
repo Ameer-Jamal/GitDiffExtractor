@@ -9,6 +9,7 @@ from typing import Any, Optional
 from ConfigManager import ConfigManager
 from services.RepositoryProvider import RepositoryProvider
 from services.contribution_history_service import ContributionHistoryService
+from services.git_context_service import GitContextService
 from models.contribution_models import ContributionHistoryQuery, RepositoryRef
 from services.diff_service import DiffService
 from headless_config import HeadlessConfig
@@ -47,6 +48,7 @@ class RepoLensMCPBackend:
         self.history_service = ContributionHistoryService(self.provider, self.scope_manager)
         self.pr_service = PullRequestService(self.config)
         self.pr_creation_service = PullRequestCreationService(self.config)
+        self.git_context_service = GitContextService()
         self.diff_service = DiffService()
 
     def get_active_context(self) -> dict[str, Any]:
@@ -456,8 +458,16 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
         return self.pr_creation_service.create_pull_request(
             repo,
             PullRequestCreateRequest(
@@ -468,6 +478,26 @@ class RepoLensMCPBackend:
                 draft=draft,
             ),
         )
+
+    def get_git_repository_context(
+        self,
+        *,
+        repo_dir: str = "",
+        source_branch: str = "",
+        target_branch: str = "",
+    ) -> dict[str, Any]:
+        context = self.git_context_service.resolve(
+            repo_dir=repo_dir or self.config.get_repo_dir(),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        result = context.to_dict()
+        result["auth"] = {
+            "github_token_configured": bool((self.config.get_github_token() or "").strip()),
+            "bitbucket_username_configured": bool((self.config.get_bitbucket_username() or "").strip()),
+            "bitbucket_app_password_configured": bool((self.config.get_bitbucket_app_password() or "").strip()),
+        }
+        return result
 
     def resolve_pr_from_reference(self, reference: str) -> tuple[dict, dict]:
         """Resolves a PR from a URL, ticket, or title fragment. Returns (repo, pr_metadata)."""
@@ -539,7 +569,16 @@ class RepoLensMCPBackend:
             "merge_commit": result.merge_commit,
         }
 
-    def resolve_repository(self, *, provider: str = "", workspace: str = "", slug: str = "", scope: str = "") -> dict:
+    def resolve_repository(
+        self,
+        *,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+        allow_direct: bool = False,
+    ) -> dict:
         desired_provider = (provider or self.config.get_provider() or "").lower()
         desired_workspace = (workspace or "").strip().lower()
         desired_slug = (slug or "").strip().lower()
@@ -548,6 +587,12 @@ class RepoLensMCPBackend:
             specific_workspace, specific_slug = self._split_repo_ref(specific_repo)
             desired_workspace = desired_workspace or specific_workspace
             desired_slug = desired_slug or specific_slug
+
+        if allow_direct and provider and workspace and slug:
+            return self._direct_repository(provider=provider, workspace=workspace, slug=slug, repo_dir=repo_dir)
+
+        if allow_direct and repo_dir:
+            return self.git_context_service.resolve(repo_dir=repo_dir).repository_dict()
 
         candidates = []
         active = self.config.get_active_repository()
@@ -588,6 +633,32 @@ class RepoLensMCPBackend:
             return repo
 
         raise ValueError("Repository could not be resolved from active, selected, or discovered repositories.")
+
+    @staticmethod
+    def _direct_repository(*, provider: str, workspace: str, slug: str, repo_dir: str = "") -> dict[str, str]:
+        normalized_provider = (provider or "").strip().lower()
+        owner = (workspace or "").strip()
+        repo_slug = (slug or "").strip()
+        full_name = f"{owner}/{repo_slug}".strip("/")
+        html_url = ""
+        clone_url = ""
+        if normalized_provider == "github":
+            html_url = f"https://github.com/{full_name}"
+            clone_url = f"https://github.com/{full_name}.git"
+        elif normalized_provider == "bitbucket":
+            html_url = f"https://bitbucket.org/{full_name}"
+            clone_url = f"https://bitbucket.org/{full_name}.git"
+        return {
+            "provider": normalized_provider,
+            "id": full_name,
+            "name": repo_slug,
+            "owner": owner,
+            "slug": repo_slug,
+            "full_name": full_name,
+            "clone_url": clone_url,
+            "html_url": html_url,
+            "local_dir": repo_dir,
+        }
 
     def _ticket_search_repositories(
         self,
@@ -960,6 +1031,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
     ) -> dict[str, Any]:
         """Create a GitHub or Bitbucket pull request from an existing remote branch."""
         return backend.create_pull_request(
@@ -972,6 +1044,20 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def get_git_repository_context(
+        repo_dir: str = "",
+        source_branch: str = "",
+        target_branch: str = "",
+    ) -> dict[str, Any]:
+        """Infer provider, repository, branch, remote, and auth context from a local Git checkout."""
+        return backend.get_git_repository_context(
+            repo_dir=repo_dir,
+            source_branch=source_branch,
+            target_branch=target_branch,
         )
 
     return app

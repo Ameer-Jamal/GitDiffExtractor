@@ -66,3 +66,20 @@ def test_create_pull_request_returns_normalized_result(service):
     assert result["source_branch"] == "feature/test"
     assert result["draft"] is True
     assert result["warnings"] == []
+
+
+def test_create_pull_request_reports_pr_specific_github_auth_error(service):
+    repo = {"provider": "github", "owner": "openai", "slug": "demo"}
+    provider = MagicMock()
+    provider.validate_credentials.side_effect = ValueError("GitHub token is required to query contribution history.")
+
+    with patch("services.pr_creation_service.build_provider_client_for_name", return_value=provider):
+        with pytest.raises(ValueError, match="GitHub token is required to create pull requests"):
+            service.create_pull_request(
+                repo,
+                PullRequestCreateRequest(
+                    title="Feature",
+                    source_branch="feature/test",
+                    target_branch="main",
+                ),
+            )

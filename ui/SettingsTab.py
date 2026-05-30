@@ -160,7 +160,7 @@ class SettingsTab(QWidget):
         bb_form.addRow(QLabel("App Password:"), self.bb_password_input)
 
         self.bb_workspace_input = QLineEdit(self)
-        self.bb_workspace_input.setPlaceholderText("Workspace id (for example: etqdev)")
+        self.bb_workspace_input.setPlaceholderText("Workspace id (for example: example-workspace)")
         self.bb_workspace_input.editingFinished.connect(self._store_bitbucket_workspace)
         bb_form.addRow(QLabel("Workspace:"), self.bb_workspace_input)
 

@@ -36,7 +36,21 @@ class PullRequestCreationService:
 
         repo_ref = RepositoryRef.from_dict(repo)
         provider = build_provider_client_for_name(provider_name, self.config)
-        provider.validate_credentials()
+        try:
+            provider.validate_credentials()
+        except ValueError as exc:
+            if provider_name == "github" and "token" in str(exc).lower():
+                raise ValueError(
+                    "GitHub token is required to create pull requests. "
+                    "Set REPOLENS_GITHUB_TOKEN for the MCP server or save a token in RepoLens Settings."
+                ) from exc
+            if provider_name == "bitbucket" and ("password" in str(exc).lower() or "username" in str(exc).lower()):
+                raise ValueError(
+                    "Bitbucket username and app password are required to create pull requests. "
+                    "Set REPOLENS_BITBUCKET_USERNAME and REPOLENS_BITBUCKET_APP_PASSWORD for the MCP server "
+                    "or save credentials in RepoLens Settings."
+                ) from exc
+            raise
 
         if not provider.branch_exists(repo_ref, source_branch):
             raise ValueError(f"Remote source branch '{source_branch}' does not exist.")

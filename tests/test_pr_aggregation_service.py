@@ -6,8 +6,8 @@ from services.PRAggregationService import PRAggregationService
 class PRAggregationServiceTests(unittest.TestCase):
     def setUp(self):
         self.repos = [
-            {"id": "r1", "owner": "etqdev", "slug": "mt-backend"},
-            {"id": "r2", "owner": "etqdev", "slug": "mt-frontend"},
+            {"id": "r1", "owner": "example-workspace", "slug": "backend-service"},
+            {"id": "r2", "owner": "example-workspace", "slug": "frontend-service"},
         ]
 
     def test_seed_cursor_state(self):

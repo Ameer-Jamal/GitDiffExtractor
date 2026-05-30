@@ -25,7 +25,7 @@ from services.RepositoryProvider import RepositoryProvider
 from ui.SettingsTab import SettingsTab
 from ui.TaskRunner import TaskRunner
 
-DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'etqdev').strip() or 'etqdev'
+DEFAULT_BITBUCKET_WORKSPACE = os.environ.get('BITBUCKET_WORKSPACE', 'example-workspace').strip() or 'example-workspace'
 
 # CONSTS:
 INPUT_ERROR = "Input Error"
