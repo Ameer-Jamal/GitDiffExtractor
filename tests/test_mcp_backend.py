@@ -141,3 +141,24 @@ def test_get_pr_context_url(mock_backend):
                     assert result["diff_text"] == "diff content"
                     mock_parse.assert_called_once()
                     mock_get_pr.assert_called_once()
+
+
+def test_create_pull_request(mock_backend):
+    backend, _provider = mock_backend
+    backend.resolve_repository.return_value = {
+        "provider": "github",
+        "owner": "openai",
+        "slug": "demo",
+        "full_name": "openai/demo",
+    }
+    with patch.object(backend.pr_creation_service, "create_pull_request") as mock_create:
+        mock_create.return_value = {"url": "https://github.com/openai/demo/pull/17", "number": 17}
+
+        result = backend.create_pull_request(
+            title="Feature",
+            source_branch="feature/test",
+            target_branch="main",
+        )
+
+    assert result["number"] == 17
+    mock_create.assert_called_once()

@@ -14,6 +14,7 @@ from services.diff_service import DiffService
 from headless_config import HeadlessConfig
 from services.provider_api import build_provider_client
 from services.pull_request_service import PullRequestService
+from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService
 from services.scope_manager import ScopeManager
 
 try:
@@ -45,6 +46,7 @@ class RepoLensMCPBackend:
         self.scope_manager = ScopeManager(self.config, self.provider)
         self.history_service = ContributionHistoryService(self.provider, self.scope_manager)
         self.pr_service = PullRequestService(self.config)
+        self.pr_creation_service = PullRequestCreationService(self.config)
         self.diff_service = DiffService()
 
     def get_active_context(self) -> dict[str, Any]:
@@ -441,6 +443,31 @@ class RepoLensMCPBackend:
             "repository": self._repo_identity(repo),
             "candidates": self.provider.list_developer_candidates(repo_ref, limit=limit),
         }
+
+    def create_pull_request(
+        self,
+        *,
+        title: str,
+        source_branch: str,
+        target_branch: str,
+        description: str = "",
+        draft: bool = False,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        return self.pr_creation_service.create_pull_request(
+            repo,
+            PullRequestCreateRequest(
+                title=title,
+                description=description,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                draft=draft,
+            ),
+        )
 
     def resolve_pr_from_reference(self, reference: str) -> tuple[dict, dict]:
         """Resolves a PR from a URL, ticket, or title fragment. Returns (repo, pr_metadata)."""
@@ -920,6 +947,31 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             slug=slug,
             scope=scope,
             limit=limit,
+        )
+
+    @app.tool()
+    def create_pull_request(
+        title: str,
+        source_branch: str,
+        target_branch: str,
+        description: str = "",
+        draft: bool = False,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+    ) -> dict[str, Any]:
+        """Create a GitHub or Bitbucket pull request from an existing remote branch."""
+        return backend.create_pull_request(
+            title=title,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            description=description,
+            draft=draft,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
         )
 
     return app

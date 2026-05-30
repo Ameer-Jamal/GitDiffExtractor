@@ -30,6 +30,7 @@ Git providers already contain the context an AI needs, but that context is scatt
 5. **Contribution History**: Query merged PRs, commits, or both by developer, date range, repository scope, branch, and text. Export results to CSV, JSON, or Markdown.
 
 6. **MCP Server Mode**: Expose repository discovery, selected repositories, PR lookup, ticket lookup, diffs, and contribution history as local MCP tools for AI clients.
+7. **PR Creation for AI Agents**: Create GitHub or Bitbucket pull requests from already-pushed source branches through the desktop app or MCP.
 
 ---
 
@@ -88,6 +89,7 @@ The MCP server is read-only for provider data. It may clone or fetch local repos
 - `analyze_file_history` (Unified commit and PR history for a specific file)
 - `get_pr_context` (Unified tool to get PR metadata and diff from a URL, ticket, or title)
 - `list_developer_candidates`
+- `create_pull_request` (Create one GitHub or Bitbucket PR from an existing remote branch)
 
 ### **General Setup**
 

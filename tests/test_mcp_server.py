@@ -50,6 +50,9 @@ class _FakeBackend:
     def list_developer_candidates(self, **kwargs):
         return {"candidates": ["ajamal"]}
 
+    def create_pull_request(self, **kwargs):
+        return {"url": "https://example.com/pr/1", "number": 1, "draft": kwargs.get("draft", False)}
+
 
 @unittest.skipIf(create_connected_server_and_client_session is None, "mcp dependency is unavailable")
 class MCPServerTests(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +66,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("find_pull_requests_by_ticket", tool_names)
             self.assertIn("get_ticket_diffs", tool_names)
             self.assertIn("list_my_pull_requests", tool_names)
+            self.assertIn("create_pull_request", tool_names)
 
             active_result = await session.call_tool("get_active_context", {})
             self.assertEqual(active_result.structuredContent["provider"], "github")
@@ -85,6 +89,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
             my_prs_result = await session.call_tool("list_my_pull_requests", {})
             self.assertEqual(my_prs_result.structuredContent["count"], 1)
+
+            create_pr_result = await session.call_tool(
+                "create_pull_request",
+                {"title": "Test PR", "source_branch": "feature/test", "target_branch": "main"},
+            )
+            self.assertEqual(create_pr_result.structuredContent["number"], 1)
 
 
 if __name__ == "__main__":
