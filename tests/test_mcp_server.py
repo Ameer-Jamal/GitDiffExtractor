@@ -53,6 +53,9 @@ class _FakeBackend:
     def create_pull_request(self, **kwargs):
         return {"url": "https://example.com/pr/1", "number": 1, "draft": kwargs.get("draft", False)}
 
+    def update_pull_request(self, **kwargs):
+        return {"url": "https://example.com/pr/1", "number": 1, "title": kwargs.get("title", "")}
+
     def get_git_repository_context(self, **kwargs):
         return {"provider": "github", "owner": "openai", "slug": "demo", "default_branch": "main"}
 
@@ -70,6 +73,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("get_ticket_diffs", tool_names)
             self.assertIn("list_my_pull_requests", tool_names)
             self.assertIn("create_pull_request", tool_names)
+            self.assertIn("update_pull_request", tool_names)
             self.assertIn("get_git_repository_context", tool_names)
 
             active_result = await session.call_tool("get_active_context", {})
@@ -96,9 +100,21 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
             create_pr_result = await session.call_tool(
                 "create_pull_request",
-                {"title": "Test PR", "source_branch": "feature/test", "target_branch": "main"},
+                {"title": "Test PR", "source_branch": "feature/test", "target_branch": "main", "repo_dir": "/tmp/demo"},
             )
             self.assertEqual(create_pr_result.structuredContent["number"], 1)
+
+            update_pr_result = await session.call_tool(
+                "update_pull_request",
+                {"pr_id": "1", "title": "Updated Title", "repo_dir": "/tmp/demo"},
+            )
+            self.assertEqual(update_pr_result.structuredContent["title"], "Updated Title")
+
+            list_result = await session.call_tool("list_pull_requests", {"repo_dir": "/tmp/demo"})
+            self.assertEqual(list_result.structuredContent["records"][0]["id"], 1)
+
+            pr_diff_with_dir = await session.call_tool("get_pr_diff", {"pr_id": "7", "repo_dir": "/tmp/demo"})
+            self.assertEqual(pr_diff_with_dir.structuredContent["pr"]["id"], "7")
 
             git_context_result = await session.call_tool("get_git_repository_context", {})
             self.assertEqual(git_context_result.structuredContent["default_branch"], "main")

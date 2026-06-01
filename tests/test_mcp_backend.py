@@ -164,6 +164,27 @@ def test_create_pull_request(mock_backend):
     mock_create.assert_called_once()
 
 
+def test_update_pull_request(mock_backend):
+    backend, _provider = mock_backend
+    backend.resolve_repository.return_value = {
+        "provider": "github",
+        "owner": "openai",
+        "slug": "demo",
+        "full_name": "openai/demo",
+    }
+    with patch.object(backend.pr_creation_service, "update_pull_request") as mock_update:
+        mock_update.return_value = {"number": 17, "title": "New Title"}
+
+        result = backend.update_pull_request(
+            pr_id=17,
+            title="New Title",
+        )
+
+    assert result["number"] == 17
+    assert result["title"] == "New Title"
+    mock_update.assert_called_once()
+
+
 def test_create_pull_request_uses_direct_repo_args():
     config = MagicMock()
     config.get_provider.return_value = "bitbucket"
@@ -254,3 +275,105 @@ def test_get_git_repository_context_returns_auth_status():
 
     assert result["auth"]["github_token_configured"] is True
     assert result["auth"]["bitbucket_username_configured"] is False
+
+
+def test_list_pull_requests_can_infer_repo_from_repo_dir():
+    config = MagicMock()
+    config.get_provider.return_value = "bitbucket"
+    config.get_active_repository.return_value = {}
+    config.get_selected_repositories.return_value = []
+    config.get_managed_repo_root.return_value = ""
+    config.get_repo_dir.return_value = ""
+    config.effective_source_summary.return_value = {}
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_build.return_value = MagicMock()
+        backend = RepoLensMCPBackend(config)
+
+    inferred_context = MagicMock()
+    inferred_context.repository_dict.return_value = {
+        "provider": "bitbucket",
+        "owner": "example-workspace",
+        "slug": "backend-service",
+        "local_dir": "/tmp/backend-service",
+    }
+    with patch.object(backend.git_context_service, "resolve", return_value=inferred_context):
+        with patch.object(backend.pr_service, "list_pull_requests_for_repo") as mock_list:
+            mock_list.return_value = ([{"id": 1}], "")
+            result = backend.list_pull_requests(repo_dir="/tmp/backend-service", filter_mode="OPEN")
+
+    assert result["repository"]["provider"] == "bitbucket"
+    assert result["records"] == [{"id": 1}]
+    repo_arg = mock_list.call_args.args[0]
+    assert repo_arg["owner"] == "example-workspace"
+
+
+def test_get_pr_diff_can_infer_repo_from_repo_dir():
+    config = MagicMock()
+    config.get_provider.return_value = "bitbucket"
+    config.get_active_repository.return_value = {}
+    config.get_selected_repositories.return_value = []
+    config.get_managed_repo_root.return_value = ""
+    config.get_repo_dir.return_value = ""
+    config.effective_source_summary.return_value = {}
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_build.return_value = MagicMock()
+        backend = RepoLensMCPBackend(config)
+
+    inferred_context = MagicMock()
+    inferred_context.repository_dict.return_value = {
+        "provider": "bitbucket",
+        "owner": "example-workspace",
+        "slug": "backend-service",
+        "local_dir": "/tmp/backend-service",
+    }
+    with patch.object(backend.git_context_service, "resolve", return_value=inferred_context):
+        with patch.object(backend.pr_service, "get_pull_request", return_value={"id": 2429}) as mock_get:
+            with patch.object(backend.diff_service, "generate_pr_diff") as mock_diff:
+                mock_diff.return_value = MagicMock(
+                    diff_text="diff --git",
+                    merge_base="base",
+                    source_commit="src",
+                    destination_commit="dst",
+                    merge_commit="merge",
+                    resolved_source="src",
+                    resolved_destination="dst",
+                )
+                result = backend.get_pr_diff(pr_id="2429", repo_dir="/tmp/backend-service")
+
+    assert result["repo_dir"] == "/tmp/backend-service"
+    assert result["diff_text"] == "diff --git"
+    repo_arg = mock_get.call_args.args[0]
+    assert repo_arg["slug"] == "backend-service"
+
+
+def test_update_pull_request_can_infer_repo_from_repo_dir():
+    config = MagicMock()
+    config.get_provider.return_value = "bitbucket"
+    config.get_active_repository.return_value = {}
+    config.get_selected_repositories.return_value = []
+    config.get_managed_repo_root.return_value = ""
+    config.get_repo_dir.return_value = ""
+    config.effective_source_summary.return_value = {}
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_build.return_value = MagicMock()
+        backend = RepoLensMCPBackend(config)
+
+    inferred_context = MagicMock()
+    inferred_context.repository_dict.return_value = {
+        "provider": "bitbucket",
+        "owner": "example-workspace",
+        "slug": "backend-service",
+        "local_dir": "/tmp/backend-service",
+    }
+    with patch.object(backend.git_context_service, "resolve", return_value=inferred_context):
+        with patch.object(backend.pr_creation_service, "update_pull_request") as mock_update:
+            mock_update.return_value = {"number": 2429}
+            result = backend.update_pull_request(
+                pr_id="2429",
+                repo_dir="/tmp/backend-service",
+                title="Updated title",
+            )
+
+    assert result["number"] == 2429
+    repo_arg = mock_update.call_args.args[0]
+    assert repo_arg["owner"] == "example-workspace"

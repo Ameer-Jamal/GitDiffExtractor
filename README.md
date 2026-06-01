@@ -96,9 +96,10 @@ For AI-driven PR creation, a good workflow is:
 
 1. Use normal Git commands to create a focused branch, commit changes, and push that branch.
 2. Call `get_git_repository_context` with the checkout path and branch names to confirm provider/repository context and remote branch availability.
-3. Call `create_pull_request` with `source_branch`, `target_branch`, `title`, `description`, and either explicit `provider`/`workspace`/`slug` or `repo_dir`.
+3. Use `repo_dir` or explicit `provider`/`workspace`/`slug` when calling PR tools so the MCP does not depend on the desktop app's active repository.
+4. Call `create_pull_request` with `source_branch`, `target_branch`, `title`, and `description`.
 
-`create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME`, and `REPOLENS_BITBUCKET_APP_PASSWORD` over relying on the desktop app's currently selected repository.
+`list_pull_requests`, `get_pr_diff`, `get_commit_diff`, `create_pull_request`, and `update_pull_request` accept `repo_dir` for local-checkout-based repository inference. `create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME`, and `REPOLENS_BITBUCKET_APP_PASSWORD` over relying on the desktop app's currently selected repository.
 
 ### **General Setup**
 

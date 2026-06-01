@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService
+from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService, PullRequestUpdateRequest
 
 
 @pytest.fixture
@@ -28,6 +28,39 @@ def test_create_pull_request_validates_remote_branches(service):
                     target_branch="main",
                 ),
             )
+
+
+def test_update_pull_request_returns_normalized_result(service):
+    repo = {
+        "provider": "github",
+        "owner": "openai",
+        "slug": "demo",
+        "full_name": "openai/demo",
+    }
+    provider = MagicMock()
+    provider.branch_exists.return_value = True
+    provider.update_pull_request.return_value = {
+        "number": 17,
+        "title": "New Title",
+        "html_url": "https://github.com/openai/demo/pull/17",
+        "state": "open",
+    }
+
+    with patch("services.pr_creation_service.build_provider_client_for_name", return_value=provider):
+        result = service.update_pull_request(
+            repo,
+            PullRequestUpdateRequest(
+                pr_id=17,
+                title="New Title",
+                description="New Desc",
+                target_branch="main",
+            ),
+        )
+
+    assert result["pr_id"] == 17
+    assert result["title"] == "New Title"
+    assert result["url"] == "https://github.com/openai/demo/pull/17"
+    assert result["state"] == "OPEN"
 
 
 def test_create_pull_request_returns_normalized_result(service):
