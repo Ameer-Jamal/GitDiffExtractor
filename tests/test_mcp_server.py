@@ -59,6 +59,9 @@ class _FakeBackend:
     def get_git_repository_context(self, **kwargs):
         return {"provider": "github", "owner": "openai", "slug": "demo", "default_branch": "main"}
 
+    def get_pr_context(self, **kwargs):
+        return {"repo_dir": kwargs.get("repo_dir", ""), "pr": {"id": 2430}, "diff_text": "diff --git"}
+
 
 @unittest.skipIf(create_connected_server_and_client_session is None, "mcp dependency is unavailable")
 class MCPServerTests(unittest.IsolatedAsyncioTestCase):
@@ -75,6 +78,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("create_pull_request", tool_names)
             self.assertIn("update_pull_request", tool_names)
             self.assertIn("get_git_repository_context", tool_names)
+            self.assertIn("get_pr_context", tool_names)
 
             active_result = await session.call_tool("get_active_context", {})
             self.assertEqual(active_result.structuredContent["provider"], "github")
@@ -115,6 +119,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
             pr_diff_with_dir = await session.call_tool("get_pr_diff", {"pr_id": "7", "repo_dir": "/tmp/demo"})
             self.assertEqual(pr_diff_with_dir.structuredContent["pr"]["id"], "7")
+
+            pr_context_result = await session.call_tool(
+                "get_pr_context",
+                {"reference": "https://bitbucket.org/example-workspace/backend-service/pull-requests/2430", "repo_dir": "/tmp/demo"},
+            )
+            self.assertEqual(pr_context_result.structuredContent["repo_dir"], "/tmp/demo")
 
             git_context_result = await session.call_tool("get_git_repository_context", {})
             self.assertEqual(git_context_result.structuredContent["default_branch"], "main")

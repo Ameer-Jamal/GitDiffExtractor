@@ -143,6 +143,45 @@ def test_get_pr_context_url(mock_backend):
                     mock_get_pr.assert_called_once()
 
 
+def test_get_pr_context_url_with_repo_dir_uses_direct_resolution():
+    config = MagicMock()
+    config.get_provider.return_value = "bitbucket"
+    config.get_active_repository.return_value = {}
+    config.get_selected_repositories.return_value = []
+    config.get_managed_repo_root.return_value = ""
+    config.get_repo_dir.return_value = ""
+    config.effective_source_summary.return_value = {}
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_build.return_value = MagicMock()
+        backend = RepoLensMCPBackend(config)
+
+    with patch.object(backend.pr_service, "parse_pr_url") as mock_parse:
+        mock_parse.return_value = {
+            "provider": "bitbucket",
+            "workspace": "example-workspace",
+            "slug": "backend-service",
+            "pr_id": "2430",
+        }
+        with patch.object(backend.pr_service, "get_pull_request", return_value={"id": 2430}) as mock_get_pr:
+            with patch.object(backend.diff_service, "generate_pr_diff") as mock_diff:
+                mock_diff.return_value = MagicMock(
+                    diff_text="diff content",
+                    merge_base="base",
+                    source_commit="src",
+                    destination_commit="dst",
+                    merge_commit="mrg",
+                )
+                result = backend.get_pr_context(
+                    reference="https://bitbucket.org/example-workspace/backend-service/pull-requests/2430",
+                    repo_dir="/tmp/backend-service",
+                )
+
+    assert result["repo_dir"] == "/tmp/backend-service"
+    repo_arg = mock_get_pr.call_args.args[0]
+    assert repo_arg["owner"] == "example-workspace"
+    assert repo_arg["local_dir"] == "/tmp/backend-service"
+
+
 def test_create_pull_request(mock_backend):
     backend, _provider = mock_backend
     backend.resolve_repository.return_value = {
@@ -305,6 +344,33 @@ def test_list_pull_requests_can_infer_repo_from_repo_dir():
     assert result["records"] == [{"id": 1}]
     repo_arg = mock_list.call_args.args[0]
     assert repo_arg["owner"] == "example-workspace"
+
+
+def test_find_pull_requests_by_ticket_uses_direct_repo_args():
+    config = MagicMock()
+    config.get_provider.return_value = "bitbucket"
+    config.get_active_repository.return_value = {"provider": "bitbucket", "owner": "wrong-workspace", "slug": "wrong-service"}
+    config.get_selected_repositories.return_value = []
+    config.get_managed_repo_root.return_value = ""
+    config.get_repo_dir.return_value = ""
+    config.effective_source_summary.return_value = {}
+    with patch("mcp_server.build_provider_client") as mock_build:
+        mock_build.return_value = MagicMock()
+        backend = RepoLensMCPBackend(config)
+
+    with patch.object(backend.pr_service, "find_pull_requests_by_ticket") as mock_find:
+        mock_find.return_value = [{"id": 2430}]
+        result = backend.find_pull_requests_by_ticket(
+            ticket="RU-25403",
+            provider="bitbucket",
+            workspace="example-workspace",
+            slug="backend-service",
+        )
+
+    assert result["count"] == 1
+    repo_arg = mock_find.call_args.args[0][0]
+    assert repo_arg["owner"] == "example-workspace"
+    assert repo_arg["slug"] == "backend-service"
 
 
 def test_get_pr_diff_can_infer_repo_from_repo_dir():
