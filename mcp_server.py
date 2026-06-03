@@ -15,7 +15,7 @@ from services.diff_service import DiffService
 from headless_config import HeadlessConfig
 from services.provider_api import build_provider_client
 from services.pull_request_service import PullRequestService
-from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService
+from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService, PullRequestUpdateRequest
 from services.scope_manager import ScopeManager
 
 try:
@@ -86,12 +86,20 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         filter_mode: str = "open",
         search_text: str = "",
         developer: str = "",
         next_cursor: str = "",
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
         records, cursor = self.pr_service.list_pull_requests_for_repo(
             repo,
             filter_mode=filter_mode,
@@ -112,6 +120,7 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "open",
     ) -> dict[str, Any]:
         repositories = self._ticket_search_repositories(
@@ -119,6 +128,7 @@ class RepoLensMCPBackend:
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
         )
         records: list[dict] = []
         for repo in repositories:
@@ -145,6 +155,7 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "all",
     ) -> dict[str, Any]:
         repositories = self._ticket_search_repositories(
@@ -152,6 +163,7 @@ class RepoLensMCPBackend:
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
         )
         ticket_id = self.pr_service.extract_ticket_id(ticket)
         records = self.pr_service.find_pull_requests_by_ticket(
@@ -175,6 +187,7 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "all",
         ensure_checkout: bool = True,
         max_chars_per_pr: int = DEFAULT_DIFF_CHAR_LIMIT,
@@ -185,6 +198,7 @@ class RepoLensMCPBackend:
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
         )
         limit = _clamp_diff_limit(max_chars_per_pr)
         ticket_results: list[dict[str, Any]] = []
@@ -250,10 +264,18 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
         pr = self.pr_service.get_pull_request(repo, pr_id)
         repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
         result = self.diff_service.generate_pr_diff(pr, repo_dir)
@@ -280,10 +302,18 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
         repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
         result = self.diff_service.generate_commit_diff(repo_dir, commit_hash)
         diff_text, truncated = self._truncate_text(result.diff_text, _clamp_diff_limit(max_chars))
@@ -380,7 +410,7 @@ class RepoLensMCPBackend:
         slug: str = "",
         scope: str = "",
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope, allow_direct=True)
         repo_ref = RepositoryRef.from_dict(repo)
         prs = self.provider.list_pull_requests_for_commit(repo_ref, commit_hash)
         return {
@@ -415,7 +445,7 @@ class RepoLensMCPBackend:
         slug: str = "",
         scope: str = "",
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope, allow_direct=True)
         repo_ref = RepositoryRef.from_dict(repo)
         result = self.history_service.execute_file_history_query(
             repo_ref,
@@ -439,7 +469,7 @@ class RepoLensMCPBackend:
         scope: str = "",
         limit: int = 50,
     ) -> dict[str, Any]:
-        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope)
+        repo = self.resolve_repository(provider=provider, workspace=workspace, slug=slug, scope=scope, allow_direct=True)
         repo_ref = RepositoryRef.from_dict(repo)
         return {
             "repository": self._repo_identity(repo),
@@ -479,6 +509,37 @@ class RepoLensMCPBackend:
             ),
         )
 
+    def update_pull_request(
+        self,
+        *,
+        pr_id: str | int,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        target_branch: Optional[str] = None,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
+        return self.pr_creation_service.update_pull_request(
+            repo,
+            PullRequestUpdateRequest(
+                pr_id=pr_id,
+                title=title,
+                description=description,
+                target_branch=target_branch,
+            ),
+        )
+
     def get_git_repository_context(
         self,
         *,
@@ -499,7 +560,15 @@ class RepoLensMCPBackend:
         }
         return result
 
-    def resolve_pr_from_reference(self, reference: str) -> tuple[dict, dict]:
+    def resolve_pr_from_reference(
+        self,
+        reference: str,
+        *,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        repo_dir: str = "",
+    ) -> tuple[dict, dict]:
         """Resolves a PR from a URL, ticket, or title fragment. Returns (repo, pr_metadata)."""
         reference = reference.strip()
         
@@ -507,9 +576,11 @@ class RepoLensMCPBackend:
         url_info = self.pr_service.parse_pr_url(reference)
         if url_info:
             repo = self.resolve_repository(
-                provider=url_info["provider"],
-                workspace=url_info["workspace"],
-                slug=url_info["slug"]
+                provider=provider or url_info["provider"],
+                workspace=workspace or url_info["workspace"],
+                slug=slug or url_info["slug"],
+                repo_dir=repo_dir,
+                allow_direct=True,
             )
             pr = self.pr_service.get_pull_request(repo, url_info["pr_id"])
             return repo, pr
@@ -517,25 +588,35 @@ class RepoLensMCPBackend:
         # 2. Try Ticket
         ticket_id = self.pr_service.extract_ticket_id(reference)
         if ticket_id:
-            # Search across selected repositories
-            selected = self.config.get_selected_repositories()
-            if not selected and self.config.get_active_repository():
-                selected = [self.config.get_active_repository()]
+            selected = self._ticket_search_repositories(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+                scope="active",
+            )
             
             prs = self.pr_service.find_pull_requests_by_ticket(selected, ticket_id)
             if prs:
                 # If multiple, we take the most recent one for now
                 pr = prs[0]
                 repo = self.resolve_repository(
-                    provider=pr.get("provider"),
-                    slug=pr.get("repo_label").split("/")[-1] if "/" in pr.get("repo_label") else pr.get("repo_label")
+                    provider=provider or pr.get("provider"),
+                    workspace=workspace,
+                    slug=slug or (pr.get("repo_label").split("/")[-1] if "/" in pr.get("repo_label") else pr.get("repo_label")),
+                    repo_dir=repo_dir,
+                    allow_direct=True,
                 )
                 return repo, pr
 
         # 3. Try Search Text (Title/Branch)
-        selected = self.config.get_selected_repositories()
-        if not selected and self.config.get_active_repository():
-            selected = [self.config.get_active_repository()]
+        selected = self._ticket_search_repositories(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            repo_dir=repo_dir,
+            scope="active",
+        )
             
         for repo in selected:
             prs, _ = self.pr_service.list_pull_requests_for_repo(repo, search_text=reference)
@@ -548,11 +629,21 @@ class RepoLensMCPBackend:
         self,
         *,
         reference: str,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
         """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
-        repo, pr = self.resolve_pr_from_reference(reference)
+        repo, pr = self.resolve_pr_from_reference(
+            reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            repo_dir=repo_dir,
+        )
         repo_dir = self._repo_dir(repo, ensure_checkout=ensure_checkout)
         result = self.diff_service.generate_pr_diff(pr, repo_dir)
         diff_text, truncated = self._truncate_text(result.diff_text, _clamp_diff_limit(max_chars))
@@ -667,9 +758,21 @@ class RepoLensMCPBackend:
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
     ) -> list[dict]:
+        if repo_dir:
+            return [
+                self.resolve_repository(
+                    provider=provider,
+                    workspace=workspace,
+                    slug=slug,
+                    scope=scope,
+                    repo_dir=repo_dir,
+                    allow_direct=True,
+                )
+            ]
         if workspace or slug:
-            return [self.resolve_repository(provider=provider, workspace=workspace, slug=slug)]
+            return [self.resolve_repository(provider=provider, workspace=workspace, slug=slug, allow_direct=True)]
 
         normalized_scope = (scope or "active").strip().lower()
         if self._specific_repo_from_scope(scope):
@@ -794,6 +897,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         filter_mode: str = "open",
         search_text: str = "",
         developer: str = "",
@@ -805,6 +909,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             filter_mode=filter_mode,
             search_text=search_text,
             developer=developer,
@@ -817,6 +922,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "open",
     ) -> dict[str, Any]:
         """List pull requests authored by the authenticated provider user."""
@@ -825,6 +931,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             filter_mode=filter_mode,
         )
 
@@ -835,6 +942,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "all",
     ) -> dict[str, Any]:
         """Find one or more pull requests associated with a ticket id like RU-25463."""
@@ -844,6 +952,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             filter_mode=filter_mode,
         )
 
@@ -854,6 +963,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "active",
+        repo_dir: str = "",
         filter_mode: str = "all",
         ensure_checkout: bool = True,
         max_chars_per_pr: int = DEFAULT_DIFF_CHAR_LIMIT,
@@ -865,6 +975,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             filter_mode=filter_mode,
             ensure_checkout=ensure_checkout,
             max_chars_per_pr=max_chars_per_pr,
@@ -877,6 +988,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
@@ -887,6 +999,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
         )
@@ -898,6 +1011,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         workspace: str = "",
         slug: str = "",
         scope: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
@@ -908,6 +1022,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             workspace=workspace,
             slug=slug,
             scope=scope,
+            repo_dir=repo_dir,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
         )
@@ -993,12 +1108,20 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     @app.tool()
     def get_pr_context(
         reference: str,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
     ) -> dict[str, Any]:
         """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
         return backend.get_pr_context(
             reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            repo_dir=repo_dir,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
         )
@@ -1040,6 +1163,31 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             target_branch=target_branch,
             description=description,
             draft=draft,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def update_pull_request(
+        pr_id: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        target_branch: Optional[str] = None,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Update an existing GitHub or Bitbucket pull request."""
+        return backend.update_pull_request(
+            pr_id=pr_id,
+            title=title,
+            description=description,
+            target_branch=target_branch,
             provider=provider,
             workspace=workspace,
             slug=slug,

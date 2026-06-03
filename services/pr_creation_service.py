@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from ConfigManager import ConfigManager
 from models.contribution_models import RepositoryRef
@@ -15,6 +15,14 @@ class PullRequestCreateRequest:
     target_branch: str
     description: str = ""
     draft: bool = False
+
+
+@dataclass(frozen=True)
+class PullRequestUpdateRequest:
+    pr_id: str | int
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_branch: Optional[str] = None
 
 
 class PullRequestCreationService:
@@ -94,4 +102,49 @@ class PullRequestCreationService:
             "state": payload.get("state") or ("OPEN" if not draft_created else "DRAFT"),
             "draft": draft_created,
             "warnings": warnings,
+        }
+
+    def update_pull_request(self, repo: dict, request: PullRequestUpdateRequest) -> dict[str, Any]:
+        provider_name = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
+        repo_ref = RepositoryRef.from_dict(repo)
+        provider = build_provider_client_for_name(provider_name, self.config)
+
+        # Validate target branch if provided
+        if request.target_branch:
+            target_branch = request.target_branch.strip().replace("origin/", "", 1)
+            if not provider.branch_exists(repo_ref, target_branch):
+                raise ValueError(f"Remote target branch '{target_branch}' does not exist.")
+        else:
+            target_branch = None
+
+        payload = provider.update_pull_request(
+            repo_ref,
+            request.pr_id,
+            title=request.title.strip() if request.title is not None else None,
+            description=request.description.strip() if request.description is not None else None,
+            target_branch=target_branch,
+        )
+
+        url = ""
+        links = payload.get("links") or {}
+        if isinstance(links, dict):
+            html_link = links.get("html") or {}
+            if isinstance(html_link, dict):
+                url = html_link.get("href") or ""
+        if not url:
+            url = payload.get("html_url") or ""
+
+        return {
+            "repository": {
+                "provider": provider_name,
+                "owner": repo.get("owner", ""),
+                "slug": repo.get("slug") or repo.get("name") or "",
+                "full_name": repo.get("full_name") or "",
+            },
+            "pr_id": payload.get("id") or payload.get("number") or "",
+            "number": payload.get("number") or payload.get("id") or "",
+            "title": payload.get("title") or (request.title if request.title is not None else ""),
+            "url": url,
+            "target_branch": payload.get("destination", {}).get("branch", {}).get("name") or payload.get("base", {}).get("ref") or (request.target_branch if request.target_branch is not None else ""),
+            "state": (payload.get("state") or "OPEN").upper(),
         }

@@ -214,6 +214,18 @@ class ProviderClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_pull_request(
+        self,
+        repository: RepositoryRef,
+        pr_id: str | int,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        target_branch: Optional[str] = None,
+    ) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
     def context_key(self) -> str:
         raise NotImplementedError
 
@@ -737,6 +749,32 @@ class BitbucketProviderClient(ProviderClient):
         response.raise_for_status()
         return response.json()
 
+    def update_pull_request(
+        self,
+        repository: RepositoryRef,
+        pr_id: str | int,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        target_branch: Optional[str] = None,
+    ) -> dict:
+        username, password = self._auth()
+        url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{repository.workspace}/{repository.slug}/pullrequests/{pr_id}"
+        )
+        payload = {}
+        if title is not None:
+            payload["title"] = title
+        if description is not None:
+            payload["description"] = description
+        if target_branch is not None:
+            payload["destination"] = {"branch": {"name": target_branch}}
+
+        response = requests.put(url, auth=(username, password), json=payload, timeout=20)
+        response.raise_for_status()
+        return response.json()
+
 
 class GitHubProviderClient(ProviderClient):
     provider_name = "github"
@@ -1101,6 +1139,33 @@ class GitHubProviderClient(ProviderClient):
                 "base": target_branch,
                 "draft": draft,
             },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def update_pull_request(
+        self,
+        repository: RepositoryRef,
+        pr_id: str | int,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        target_branch: Optional[str] = None,
+    ) -> dict:
+        url = f"https://api.github.com/repos/{repository.workspace}/{repository.slug}/pulls/{pr_id}"
+        payload = {}
+        if title is not None:
+            payload["title"] = title
+        if description is not None:
+            payload["body"] = description
+        if target_branch is not None:
+            payload["base"] = target_branch
+
+        response = requests.patch(
+            url,
+            headers=self._headers(),
+            json=payload,
             timeout=20,
         )
         response.raise_for_status()
