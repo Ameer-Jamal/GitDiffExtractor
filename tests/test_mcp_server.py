@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from mcp_server import DEFAULT_DIFF_CHAR_LIMIT, create_mcp_server
+from mcp_server import DEFAULT_DIFF_CHAR_LIMIT, create_mcp_server, main, should_refuse_tty_stdio
 
 try:
     from mcp.shared.memory import create_connected_server_and_client_session
@@ -61,6 +62,59 @@ class _FakeBackend:
 
     def get_pr_context(self, **kwargs):
         return {"repo_dir": kwargs.get("repo_dir", ""), "pr": {"id": 2430}, "diff_text": "diff --git"}
+
+
+class _FakeStdin:
+    def __init__(self, is_tty):
+        self._is_tty = is_tty
+
+    def isatty(self):
+        return self._is_tty
+
+
+class MCPServerLaunchTests(unittest.TestCase):
+    def test_should_refuse_tty_stdio_for_interactive_stdin(self):
+        self.assertTrue(should_refuse_tty_stdio(_FakeStdin(True)))
+        self.assertFalse(should_refuse_tty_stdio(_FakeStdin(False)))
+
+    def test_main_exits_when_started_directly_in_terminal(self):
+        with patch("sys.argv", ["mcp_server.py"]):
+            with patch("mcp_server.should_refuse_tty_stdio", return_value=True):
+                with patch("mcp_server.create_mcp_server") as create_server:
+                    with self.assertRaises(SystemExit) as context:
+                        main()
+
+        self.assertEqual(context.exception.code, 2)
+        create_server.assert_not_called()
+
+    def test_main_allows_piped_stdio(self):
+        class _FakeApp:
+            def run(self, transport):
+                self.transport = transport
+
+        fake_app = _FakeApp()
+        with patch("sys.argv", ["mcp_server.py"]):
+            with patch("mcp_server.should_refuse_tty_stdio", return_value=False):
+                with patch("mcp_server.RepoLensMCPBackend"):
+                    with patch("mcp_server.create_mcp_server", return_value=fake_app) as create_server:
+                        main()
+
+        create_server.assert_called_once()
+        self.assertEqual(fake_app.transport, "stdio")
+
+    def test_main_allows_tty_stdio_with_explicit_debug_flag(self):
+        class _FakeApp:
+            def run(self, transport):
+                self.transport = transport
+
+        fake_app = _FakeApp()
+        with patch("sys.argv", ["mcp_server.py", "--allow-tty-stdio"]):
+            with patch("mcp_server.should_refuse_tty_stdio", return_value=True):
+                with patch("mcp_server.RepoLensMCPBackend"):
+                    with patch("mcp_server.create_mcp_server", return_value=fake_app):
+                        main()
+
+        self.assertEqual(fake_app.transport, "stdio")
 
 
 @unittest.skipIf(create_connected_server_and_client_session is None, "mcp dependency is unavailable")

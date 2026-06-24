@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import date
 from typing import Any, Optional
 
@@ -1240,6 +1241,11 @@ def build_headless_config(cli_args: argparse.Namespace | None = None, env: dict[
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RepoLens MCP server")
+    parser.add_argument(
+        "--allow-tty-stdio",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--provider")
     parser.add_argument("--bitbucket-username")
     parser.add_argument("--bitbucket-app-password")
@@ -1260,9 +1266,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def should_refuse_tty_stdio(stdin: Any = None) -> bool:
+    stream = stdin if stdin is not None else sys.stdin
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
+    if not args.allow_tty_stdio and should_refuse_tty_stdio():
+        parser.exit(
+            2,
+            "RepoLens MCP uses stdio and must be launched by an MCP client with piped stdin/stdout.\n"
+            "Register it with your MCP client instead of running it directly in a terminal.\n"
+            "For low-level debugging, pipe JSON-RPC input into the process or pass --allow-tty-stdio.\n",
+        )
     app = create_mcp_server(RepoLensMCPBackend(build_headless_config(args)))
     app.run(transport="stdio")
 

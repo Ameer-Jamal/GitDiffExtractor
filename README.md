@@ -173,6 +173,8 @@ claude mcp add-json repolens '{"type":"stdio","command":"python3","args":["<ABSO
 
 Then run `claude mcp list` or `/mcp` in Claude Code to confirm the server is available.
 
+RepoLens refuses direct interactive terminal launches by default because a stdio MCP server waits on stdin and can otherwise be left running accidentally. Launch it through an MCP client, or pipe JSON-RPC input into it for low-level debugging.
+
 #### **Claude Desktop**
 
 Add RepoLens to `claude_desktop_config.json`:
@@ -266,14 +268,23 @@ The server reuses saved desktop-app config by default. You can override config w
 - `REPOLENS_ACTIVE_REPO_HTML_URL`
 - `REPOLENS_ACTIVE_REPO_LOCAL_DIR`
 
-Example:
+Example MCP client environment:
 
 ```bash
-REPOLENS_PROVIDER=bitbucket \
-REPOLENS_BITBUCKET_USERNAME=your-username \
-REPOLENS_BITBUCKET_APP_PASSWORD=your-app-password \
-REPOLENS_BITBUCKET_WORKSPACE=your-workspace \
-python3 <ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "python3",
+      "args": ["<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py"],
+      "env": {
+        "REPOLENS_PROVIDER": "bitbucket",
+        "REPOLENS_BITBUCKET_USERNAME": "your-username",
+        "REPOLENS_BITBUCKET_APP_PASSWORD": "your-app-password",
+        "REPOLENS_BITBUCKET_WORKSPACE": "your-workspace"
+      }
+    }
+  }
+}
 ```
 
 ---
