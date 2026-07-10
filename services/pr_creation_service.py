@@ -52,10 +52,12 @@ class PullRequestCreationService:
                     "GitHub token is required to create pull requests. "
                     "Set REPOLENS_GITHUB_TOKEN for the MCP server or save a token in RepoLens Settings."
                 ) from exc
-            if provider_name == "bitbucket" and ("password" in str(exc).lower() or "username" in str(exc).lower()):
+            if provider_name == "bitbucket" and any(
+                term in str(exc).lower() for term in ("token", "password", "username", "email")
+            ):
                 raise ValueError(
-                    "Bitbucket username and app password are required to create pull requests. "
-                    "Set REPOLENS_BITBUCKET_USERNAME and REPOLENS_BITBUCKET_APP_PASSWORD for the MCP server "
+                    "Atlassian account email and Bitbucket API token are required to create pull requests. "
+                    "Set REPOLENS_BITBUCKET_USERNAME and REPOLENS_BITBUCKET_API_TOKEN for the MCP server "
                     "or save credentials in RepoLens Settings."
                 ) from exc
             raise

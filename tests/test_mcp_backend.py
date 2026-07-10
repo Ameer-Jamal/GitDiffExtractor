@@ -296,7 +296,7 @@ def test_get_git_repository_context_returns_auth_status():
     config = MagicMock()
     config.get_github_token.return_value = "token"
     config.get_bitbucket_username.return_value = ""
-    config.get_bitbucket_app_password.return_value = ""
+    config.get_bitbucket_api_token.return_value = ""
     config.get_provider.return_value = "github"
     config.get_managed_repo_root.return_value = ""
     config.get_repo_dir.return_value = "/tmp/RepoLens"

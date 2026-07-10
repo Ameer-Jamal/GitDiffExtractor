@@ -48,6 +48,17 @@ class HeadlessConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.get_selected_repositories()[0]["owner"], "openai")
 
+    def test_api_token_env_is_used_and_wins_over_legacy_alias(self):
+        config = HeadlessConfig.from_sources(
+            base_config=TestConfigManager(),
+            env={
+                "REPOLENS_BITBUCKET_APP_PASSWORD": "legacy-secret",
+                "REPOLENS_BITBUCKET_API_TOKEN": "current-token",
+            },
+            cli_overrides={},
+        )
+        self.assertEqual(config.get_bitbucket_api_token(), "current-token")
+
 
 if __name__ == "__main__":
     unittest.main()

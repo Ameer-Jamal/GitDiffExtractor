@@ -557,7 +557,7 @@ class RepoLensMCPBackend:
         result["auth"] = {
             "github_token_configured": bool((self.config.get_github_token() or "").strip()),
             "bitbucket_username_configured": bool((self.config.get_bitbucket_username() or "").strip()),
-            "bitbucket_app_password_configured": bool((self.config.get_bitbucket_app_password() or "").strip()),
+            "bitbucket_api_token_configured": bool((self.config.get_bitbucket_api_token() or "").strip()),
         }
         return result
 
@@ -1216,7 +1216,10 @@ def build_headless_config(cli_args: argparse.Namespace | None = None, env: dict[
     cli_overrides = {
         "provider": getattr(cli_args, "provider", ""),
         "bitbucket_username": getattr(cli_args, "bitbucket_username", ""),
-        "bitbucket_app_password": getattr(cli_args, "bitbucket_app_password", ""),
+        "bitbucket_api_token": (
+            getattr(cli_args, "bitbucket_api_token", "")
+            or getattr(cli_args, "bitbucket_app_password", "")
+        ),
         "bitbucket_workspace": getattr(cli_args, "bitbucket_workspace", ""),
         "github_owner": getattr(cli_args, "github_owner", ""),
         "github_repo": getattr(cli_args, "github_repo", ""),
@@ -1248,7 +1251,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--provider")
     parser.add_argument("--bitbucket-username")
-    parser.add_argument("--bitbucket-app-password")
+    parser.add_argument("--bitbucket-api-token")
+    parser.add_argument("--bitbucket-app-password", help=argparse.SUPPRESS)
     parser.add_argument("--bitbucket-workspace")
     parser.add_argument("--github-owner")
     parser.add_argument("--github-repo")

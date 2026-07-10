@@ -302,7 +302,7 @@ class BitbucketProviderClient(ProviderClient):
     def _auth(self) -> tuple[str, str]:
         return (
             (self.config.get_bitbucket_username() or "").strip(),
-            (self.config.get_bitbucket_app_password() or "").strip(),
+            (self.config.get_bitbucket_api_token() or "").strip(),
         )
 
     def _workspace(self) -> str:
@@ -312,12 +312,12 @@ class BitbucketProviderClient(ProviderClient):
         username, password = self._auth()
         workspace = self._workspace()
         if not username or not password:
-            raise ValueError("Bitbucket username and app password are required.")
+            raise ValueError("Atlassian account email and Bitbucket API token are required.")
         if not workspace:
             raise ValueError("Bitbucket workspace is required.")
 
         # Validate against repository access in the configured workspace instead of
-        # the user profile endpoint, which may be forbidden for app passwords that
+        # the user profile endpoint, which may be forbidden for constrained API tokens that
         # only have repository scopes.
         try:
             data = _get_json_with_retry(

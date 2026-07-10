@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from services.RepositoryProvider import RepositoryProvider, RepositoryProviderError
 
@@ -74,6 +74,37 @@ class RepositoryProviderTests(unittest.TestCase):
                 RepositoryProvider._update_existing_checkout("/tmp/repo")
 
         self.assertIs(context.exception, auth_error)
+
+    def test_update_existing_checkout_uses_current_api_token_and_cleans_origin(self):
+        config = MagicMock()
+        config.get_bitbucket_api_token.return_value = "new-token"
+
+        with patch.object(RepositoryProvider, "_run_git") as run_git:
+            RepositoryProvider._update_existing_checkout(
+                "/tmp/repo",
+                "https://old-user:old-password@bitbucket.org/workspace/service.git",
+                RepositoryProvider._adapter("bitbucket"),
+                config,
+            )
+
+        commands = [call.args[0] for call in run_git.call_args_list]
+        self.assertIn(
+            [
+                "git", "remote", "set-url", "origin",
+                "https://x-bitbucket-api-token-auth:new-token@bitbucket.org/workspace/service.git",
+            ],
+            commands,
+        )
+        self.assertEqual(
+            commands[-1],
+            ["git", "remote", "set-url", "origin", "https://bitbucket.org/workspace/service.git"],
+        )
+
+    def test_strip_userinfo_removes_legacy_credentials(self):
+        self.assertEqual(
+            RepositoryProvider._strip_userinfo("https://user:password@bitbucket.org/workspace/service.git"),
+            "https://bitbucket.org/workspace/service.git",
+        )
 
 
 if __name__ == "__main__":

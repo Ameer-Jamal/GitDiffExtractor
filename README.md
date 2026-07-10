@@ -99,7 +99,7 @@ For AI-driven PR creation, a good workflow is:
 3. Use `repo_dir` or explicit `provider`/`workspace`/`slug` when calling PR tools so the MCP does not depend on the desktop app's active repository.
 4. Call `create_pull_request` with `source_branch`, `target_branch`, `title`, and `description`.
 
-`list_pull_requests`, `get_pr_diff`, `get_commit_diff`, `create_pull_request`, and `update_pull_request` accept `repo_dir` for local-checkout-based repository inference. `create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME`, and `REPOLENS_BITBUCKET_APP_PASSWORD` over relying on the desktop app's currently selected repository.
+`list_pull_requests`, `get_pr_diff`, `get_commit_diff`, `create_pull_request`, and `update_pull_request` accept `repo_dir` for local-checkout-based repository inference. `create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME` (your Atlassian email), and `REPOLENS_BITBUCKET_API_TOKEN` over relying on the desktop app's currently selected repository.
 
 ### **General Setup**
 
@@ -252,7 +252,7 @@ The server reuses saved desktop-app config by default. You can override config w
 
 - `REPOLENS_PROVIDER`
 - `REPOLENS_BITBUCKET_USERNAME`
-- `REPOLENS_BITBUCKET_APP_PASSWORD`
+- `REPOLENS_BITBUCKET_API_TOKEN` (legacy `REPOLENS_BITBUCKET_APP_PASSWORD` is accepted temporarily)
 - `REPOLENS_BITBUCKET_WORKSPACE`
 - `REPOLENS_GITHUB_OWNER`
 - `REPOLENS_GITHUB_REPO`
@@ -278,8 +278,8 @@ Example MCP client environment:
       "args": ["<ABSOLUTE_PATH_TO_REPOLENS>/mcp_server.py"],
       "env": {
         "REPOLENS_PROVIDER": "bitbucket",
-        "REPOLENS_BITBUCKET_USERNAME": "your-username",
-        "REPOLENS_BITBUCKET_APP_PASSWORD": "your-app-password",
+        "REPOLENS_BITBUCKET_USERNAME": "you@example.com",
+        "REPOLENS_BITBUCKET_API_TOKEN": "your-api-token",
         "REPOLENS_BITBUCKET_WORKSPACE": "your-workspace"
       }
     }
