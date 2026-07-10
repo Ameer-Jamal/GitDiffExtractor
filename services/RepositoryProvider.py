@@ -37,11 +37,11 @@ class BitbucketProvider(ProviderAdapter):
 
     def validate_config(self, config) -> Tuple[bool, str, Optional[dict]]:
         username = (config.get_bitbucket_username() or "").strip()
-        password = (config.get_bitbucket_app_password() or "").strip()
+        password = (config.get_bitbucket_api_token() or "").strip()
         workspace = (config.get_bitbucket_workspace() or "").strip()
 
         if not username or not password:
-            return False, "Bitbucket username and app password are required.", None
+            return False, "Atlassian account email and Bitbucket API token are required.", None
         if not workspace:
             return False, "Bitbucket workspace is required.", None
 
@@ -99,9 +99,13 @@ class BitbucketProvider(ProviderAdapter):
         return repos
 
     def authenticated_clone_url(self, clone_url: str, config) -> str:
-        username = (config.get_bitbucket_username() or "").strip()
-        password = (config.get_bitbucket_app_password() or "").strip()
-        return RepositoryProvider._inject_basic_auth(clone_url, username, password)
+        password = (config.get_bitbucket_api_token() or "").strip()
+        # Bitbucket API tokens use an Atlassian email for REST authentication,
+        # but Git-over-HTTPS requires a Bitbucket username. Its documented
+        # x-bitbucket-api-token-auth alias avoids asking users for both IDs.
+        return RepositoryProvider._inject_basic_auth(
+            clone_url, "x-bitbucket-api-token-auth", password
+        )
 
 
 class GitHubProvider(ProviderAdapter):
@@ -215,8 +219,10 @@ class RepositoryProvider:
         if not os.path.exists(local_dir):
             clone_target = adapter.authenticated_clone_url(clone_url, config)
             cls._run_git(["git", "clone", clone_target, local_dir])
+            # Never persist a token in .git/config after cloning.
+            cls._run_git(["git", "remote", "set-url", "origin", cls._strip_userinfo(clone_url)], cwd=local_dir)
         else:
-            cls._update_existing_checkout(local_dir)
+            cls._update_existing_checkout(local_dir, clone_url, adapter, config)
 
         return local_dir
 
@@ -230,30 +236,38 @@ class RepositoryProvider:
         return prepared
 
     @classmethod
-    def _update_existing_checkout(cls, local_dir: str) -> None:
+    def _update_existing_checkout(cls, local_dir: str, clone_url: str = "", adapter: Optional[ProviderAdapter] = None, config=None) -> None:
+        # Existing checkouts may contain an expired credential. Temporarily set
+        # the current API-token URL for network operations, then restore a clean
+        # credential-free origin even when fetch fails.
+        clean_url = cls._strip_userinfo(clone_url) if clone_url else ""
+        authenticated_url = adapter.authenticated_clone_url(clean_url, config) if adapter and config and clean_url else ""
+        if authenticated_url:
+            cls._run_git(["git", "remote", "set-url", "origin", authenticated_url], cwd=local_dir)
         try:
             cls._run_git(["git", "fetch", "--all", "--prune"], cwd=local_dir)
-            return
         except RepositoryProviderError as exc:
             if not cls._is_stale_remote_ref_error(str(exc)):
                 raise
             first_error = exc
-
-        recovery_steps = (
-            lambda: cls._remove_stale_remote_tracking_refs(local_dir, "origin"),
-            ["git", "remote", "prune", "origin"],
-            ["git", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
-        )
-        for step in recovery_steps:
-            try:
-                if callable(step):
-                    step()
-                else:
-                    cls._run_git(step, cwd=local_dir)
-            except RepositoryProviderError as exc:
-                raise RepositoryProviderError(
-                    f"{first_error}\n\nAutomatic stale remote-ref recovery failed: {exc}"
-                ) from exc
+            recovery_steps = (
+                lambda: cls._remove_stale_remote_tracking_refs(local_dir, "origin"),
+                ["git", "remote", "prune", "origin"],
+                ["git", "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+            )
+            for step in recovery_steps:
+                try:
+                    if callable(step):
+                        step()
+                    else:
+                        cls._run_git(step, cwd=local_dir)
+                except RepositoryProviderError as recovery_exc:
+                    raise RepositoryProviderError(
+                        f"{first_error}\n\nAutomatic stale remote-ref recovery failed: {recovery_exc}"
+                    ) from recovery_exc
+        finally:
+            if authenticated_url:
+                cls._run_git(["git", "remote", "set-url", "origin", clean_url], cwd=local_dir)
 
     @classmethod
     def _remove_stale_remote_tracking_refs(cls, local_dir: str, remote: str) -> None:
@@ -327,6 +341,15 @@ class RepositoryProvider:
         safe_password = quote(password, safe="")
         netloc = f"{safe_user}:{safe_password}@{host}{port}"
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+    @staticmethod
+    def _strip_userinfo(url: str) -> str:
+        parts = urlsplit(url)
+        if not parts.netloc:
+            return url
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+        return urlunsplit((parts.scheme, f"{host}{port}", parts.path, parts.query, parts.fragment))
 
     @staticmethod
     def _inject_token_auth(url: str, token: str) -> str:

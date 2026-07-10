@@ -36,6 +36,9 @@ class ConfigManager:
     DEFAULT_PROVIDER_CONFIG = {
         "provider": "bitbucket",
         "bitbucket_username": "",
+        # API tokens replaced Bitbucket app passwords in 2026.  Keep the old
+        # setting only so existing installations can be migrated safely.
+        "bitbucket_api_token": "",
         "bitbucket_app_password": "",
         "bitbucket_workspace": "",
         "github_owner": "",
@@ -180,6 +183,7 @@ class ConfigManager:
                 "provider",
                 "bitbucket_username",
                 "bitbucket_app_password",
+                "bitbucket_api_token",
                 "bitbucket_workspace",
                 "github_owner",
                 "github_repo",
@@ -376,10 +380,19 @@ class ConfigManager:
         self._set_global("bitbucket_username", username)
 
     def get_bitbucket_app_password(self) -> str:
-        return self._get_global("bitbucket_app_password")
+        """Compatibility alias for integrations built before API-token support."""
+        return self.get_bitbucket_api_token()
 
     def set_bitbucket_app_password(self, pwd: str) -> None:
-        self._set_global("bitbucket_app_password", pwd)
+        self.set_bitbucket_api_token(pwd)
+
+    def get_bitbucket_api_token(self) -> str:
+        return self._get_global("bitbucket_api_token") or self._get_global("bitbucket_app_password")
+
+    def set_bitbucket_api_token(self, token: str) -> None:
+        self._set_global("bitbucket_api_token", token)
+        # Do not retain a second copy of a newly entered secret.
+        self._set_global("bitbucket_app_password", "")
 
     def get_bitbucket_workspace(self) -> str:
         return self._get_global("bitbucket_workspace")

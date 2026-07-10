@@ -149,15 +149,15 @@ class SettingsTab(QWidget):
         bb_form.setVerticalSpacing(8)
 
         self.bb_user_input = QLineEdit(self)
-        self.bb_user_input.setPlaceholderText("Bitbucket username")
+        self.bb_user_input.setPlaceholderText("Atlassian account email")
         self.bb_user_input.editingFinished.connect(self._store_bitbucket_username)
-        bb_form.addRow(QLabel("Username:"), self.bb_user_input)
+        bb_form.addRow(QLabel("Atlassian email:"), self.bb_user_input)
 
         self.bb_password_input = QLineEdit(self)
         self.bb_password_input.setEchoMode(QLineEdit.Password)
-        self.bb_password_input.setPlaceholderText("Bitbucket app password")
+        self.bb_password_input.setPlaceholderText("Bitbucket API token")
         self.bb_password_input.editingFinished.connect(self._store_bitbucket_password)
-        bb_form.addRow(QLabel("App Password:"), self.bb_password_input)
+        bb_form.addRow(QLabel("API Token:"), self.bb_password_input)
 
         self.bb_workspace_input = QLineEdit(self)
         self.bb_workspace_input.setPlaceholderText("Workspace id (for example: example-workspace)")
@@ -345,7 +345,7 @@ class SettingsTab(QWidget):
         self._set_provider(provider)
 
         self._set_line_edit(self.bb_user_input, self.config.get_bitbucket_username())
-        self._set_line_edit(self.bb_password_input, self.config.get_bitbucket_app_password())
+        self._set_line_edit(self.bb_password_input, self.config.get_bitbucket_api_token())
         self._set_line_edit(self.bb_workspace_input, self.config.get_bitbucket_workspace())
 
         self._set_line_edit(self.github_owner_input, self.config.get_github_owner())
@@ -472,7 +472,7 @@ class SettingsTab(QWidget):
         self.settingsUpdated.emit()
 
     def _store_bitbucket_password(self):
-        self.config.set_bitbucket_app_password(self.bb_password_input.text().strip())
+        self.config.set_bitbucket_api_token(self.bb_password_input.text().strip())
         self.settingsUpdated.emit()
 
     def _store_bitbucket_workspace(self):
@@ -745,7 +745,7 @@ class SettingsTab(QWidget):
     def _focus_provider_config(self, provider: str):
         if provider == "bitbucket":
             if not (self.config.get_bitbucket_username() or "").strip() or not (
-                self.config.get_bitbucket_app_password() or ""
+                self.config.get_bitbucket_api_token() or ""
             ).strip():
                 self.focus_bitbucket_credentials()
             else:

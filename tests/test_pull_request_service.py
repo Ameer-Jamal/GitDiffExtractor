@@ -17,7 +17,7 @@ class _Config:
     def get_bitbucket_username(self):
         return "user"
 
-    def get_bitbucket_app_password(self):
+    def get_bitbucket_api_token(self):
         return "pass"
 
     def get_bitbucket_workspace(self):

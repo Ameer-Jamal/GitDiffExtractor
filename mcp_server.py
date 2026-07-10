@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import date
 from typing import Any, Optional
 
@@ -556,7 +557,7 @@ class RepoLensMCPBackend:
         result["auth"] = {
             "github_token_configured": bool((self.config.get_github_token() or "").strip()),
             "bitbucket_username_configured": bool((self.config.get_bitbucket_username() or "").strip()),
-            "bitbucket_app_password_configured": bool((self.config.get_bitbucket_app_password() or "").strip()),
+            "bitbucket_api_token_configured": bool((self.config.get_bitbucket_api_token() or "").strip()),
         }
         return result
 
@@ -1215,7 +1216,10 @@ def build_headless_config(cli_args: argparse.Namespace | None = None, env: dict[
     cli_overrides = {
         "provider": getattr(cli_args, "provider", ""),
         "bitbucket_username": getattr(cli_args, "bitbucket_username", ""),
-        "bitbucket_app_password": getattr(cli_args, "bitbucket_app_password", ""),
+        "bitbucket_api_token": (
+            getattr(cli_args, "bitbucket_api_token", "")
+            or getattr(cli_args, "bitbucket_app_password", "")
+        ),
         "bitbucket_workspace": getattr(cli_args, "bitbucket_workspace", ""),
         "github_owner": getattr(cli_args, "github_owner", ""),
         "github_repo": getattr(cli_args, "github_repo", ""),
@@ -1240,9 +1244,15 @@ def build_headless_config(cli_args: argparse.Namespace | None = None, env: dict[
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RepoLens MCP server")
+    parser.add_argument(
+        "--allow-tty-stdio",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--provider")
     parser.add_argument("--bitbucket-username")
-    parser.add_argument("--bitbucket-app-password")
+    parser.add_argument("--bitbucket-api-token")
+    parser.add_argument("--bitbucket-app-password", help=argparse.SUPPRESS)
     parser.add_argument("--bitbucket-workspace")
     parser.add_argument("--github-owner")
     parser.add_argument("--github-repo")
@@ -1260,9 +1270,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def should_refuse_tty_stdio(stdin: Any = None) -> bool:
+    stream = stdin if stdin is not None else sys.stdin
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
+    if not args.allow_tty_stdio and should_refuse_tty_stdio():
+        parser.exit(
+            2,
+            "RepoLens MCP uses stdio and must be launched by an MCP client with piped stdin/stdout.\n"
+            "Register it with your MCP client instead of running it directly in a terminal.\n"
+            "For low-level debugging, pipe JSON-RPC input into the process or pass --allow-tty-stdio.\n",
+        )
     app = create_mcp_server(RepoLensMCPBackend(build_headless_config(args)))
     app.run(transport="stdio")
 

@@ -79,7 +79,7 @@ class PullRequestService:
         resolved_developer = self.resolve_developer_filter(developer)
         if provider == "bitbucket":
             username = (self.config.get_bitbucket_username() or "").strip()
-            password = (self.config.get_bitbucket_app_password() or "").strip()
+            password = (self.config.get_bitbucket_api_token() or "").strip()
             if not username or not password:
                 return results
 
@@ -212,11 +212,11 @@ class PullRequestService:
 
     def _get_bitbucket_config(self, repo: dict) -> dict:
         username = (self.config.get_bitbucket_username() or "").strip()
-        password = (self.config.get_bitbucket_app_password() or "").strip()
+        password = (self.config.get_bitbucket_api_token() or "").strip()
         workspace = (repo.get("owner") or self.config.get_bitbucket_workspace() or "").strip()
         slug = (repo.get("slug") or "").strip()
         if not username or not password:
-            raise ValueError("Bitbucket username and app password are required.")
+            raise ValueError("Atlassian account email and Bitbucket API token are required.")
         if not workspace or not slug:
             raise ValueError("Bitbucket workspace and repository slug are required.")
         return {

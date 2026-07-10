@@ -320,7 +320,7 @@ class RepoLens(QWidget):
                             msg += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
                         if actions["missing_ai_targets"]:
                             msg += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
-                        QMessageBox.information(self, "Success", msg)
+                        self._show_diff_completion_dialog(msg, diff_path)
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.critical(self, "Error", f"Failed to generate PR diff:\n{exc}")
                 return
@@ -769,7 +769,7 @@ class RepoLens(QWidget):
 
     def _get_bitbucket_config(self, repo=None, show_dialog=True):
         username = (self.config_manager.get_bitbucket_username() or '').strip()
-        password = (self.config_manager.get_bitbucket_app_password() or '').strip()
+        password = (self.config_manager.get_bitbucket_api_token() or '').strip()
         active_repo = repo or self.config_manager.get_active_repository()
         slug = (active_repo.get('slug') or '').strip()
         active_workspace = (active_repo.get('owner') or '').strip()
@@ -781,7 +781,7 @@ class RepoLens(QWidget):
                 QMessageBox.warning(
                     self,
                     "Bitbucket Configuration",
-                    "Bitbucket username and app password are required."
+                    "Atlassian account email and Bitbucket API token are required."
                     "\nPlease update them in the Settings tab.",
                 )
                 self.tabs.setCurrentWidget(self.settings_tab)
@@ -950,7 +950,7 @@ class RepoLens(QWidget):
                     msg += "\nOpened AI tabs (OpenAI, Claude, Gemini, Grok)."
                 if actions["missing_ai_targets"]:
                     msg += "\n'Copy and open AI tabs' is enabled, but no AI targets or custom links are selected."
-                QMessageBox.information(self, "Success", msg)
+                self._show_diff_completion_dialog(msg, diff_path)
             else:
                 warnings = result.get('warnings', [])
                 message = f"Processed {len(paths)} diff file(s)."
@@ -1131,6 +1131,22 @@ class RepoLens(QWidget):
             "opened_ai_tabs": bool(ai_urls),
             "missing_ai_targets": copy_open_ai and not bool(ai_urls),
         }
+
+    def _show_diff_completion_dialog(self, message, diff_path):
+        """Show a completion message with an explicit one-click file opener."""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Success")
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        open_button = dialog.addButton("Open", QMessageBox.ActionRole)
+        dialog.exec_()
+
+        if dialog.clickedButton() is open_button:
+            self.openFile(
+                diff_path,
+                app_path=self.config_manager.get_editor_app_path(),
+            )
 
     # ------------------------------------------------------------------
     # Configuration synchronisation

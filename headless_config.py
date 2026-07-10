@@ -9,7 +9,9 @@ from ConfigManager import ConfigManager
 _ENV_TO_KEY = {
     "REPOLENS_PROVIDER": "provider",
     "REPOLENS_BITBUCKET_USERNAME": "bitbucket_username",
-    "REPOLENS_BITBUCKET_APP_PASSWORD": "bitbucket_app_password",
+    # Backward-compatible alias. New deployments should use API_TOKEN.
+    "REPOLENS_BITBUCKET_APP_PASSWORD": "bitbucket_api_token",
+    "REPOLENS_BITBUCKET_API_TOKEN": "bitbucket_api_token",
     "REPOLENS_BITBUCKET_WORKSPACE": "bitbucket_workspace",
     "REPOLENS_GITHUB_OWNER": "github_owner",
     "REPOLENS_GITHUB_REPO": "github_repo",
@@ -63,7 +65,10 @@ class HeadlessConfig:
         return self._value("bitbucket_username", self.base_config.get_bitbucket_username())
 
     def get_bitbucket_app_password(self) -> str:
-        return self._value("bitbucket_app_password", self.base_config.get_bitbucket_app_password())
+        return self.get_bitbucket_api_token()
+
+    def get_bitbucket_api_token(self) -> str:
+        return self._value("bitbucket_api_token", self.base_config.get_bitbucket_api_token())
 
     def get_bitbucket_workspace(self) -> str:
         return self._value("bitbucket_workspace", self.base_config.get_bitbucket_workspace())
@@ -114,7 +119,7 @@ class HeadlessConfig:
         keys = [
             "provider",
             "bitbucket_username",
-            "bitbucket_app_password",
+            "bitbucket_api_token",
             "bitbucket_workspace",
             "github_owner",
             "github_repo",
