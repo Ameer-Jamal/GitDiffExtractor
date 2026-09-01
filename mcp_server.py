@@ -1042,7 +1042,7 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         titles_only: bool = False,
         repositories_json: str = "",
     ) -> dict[str, Any]:
-        """Query merged pull requests and commit history using the existing history service."""
+        """Query contribution history. Use contributed_repos for fast Bitbucket PR-based discovery."""
         return backend.query_contribution_history(
             developer=developer,
             start_date=start_date,

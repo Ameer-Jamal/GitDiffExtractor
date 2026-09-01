@@ -259,6 +259,7 @@ class ContributionHistoryTab(QWidget):
         filter_layout.addWidget(self.end_date_edit, 1, 3)
 
         self.scope_combo = QComboBox(self)
+        self.scope_combo.addItem("Contributed repos (fast, PR-discovered)", "contributed_repos")
         self.scope_combo.addItem("Selected repos (Settings)", "selected_repos")
         self.scope_combo.addItem("Custom repo selection", "custom_repos")
         self.scope_combo.addItem("All repos", "all_repos")
@@ -459,6 +460,18 @@ class ContributionHistoryTab(QWidget):
         self.provider = build_provider_client(self.config)
         self.scope_manager = ScopeManager(self.config, self.provider)
         self.history_service = ContributionHistoryService(self.provider, self.scope_manager)
+        smart_index = self.scope_combo.findData("contributed_repos")
+        if smart_index >= 0:
+            item = self.scope_combo.model().item(smart_index)
+            is_bitbucket = (self.provider.provider_name or "").lower() == "bitbucket"
+            item.setEnabled(is_bitbucket)
+            item.setToolTip(
+                "Uses Bitbucket's workspace pull-request API to find repositories the developer authored PRs in."
+                if is_bitbucket
+                else "Fast contributed-repository discovery is currently available for Bitbucket only."
+            )
+            if not is_bitbucket and self.scope_combo.currentData() == "contributed_repos":
+                self.scope_combo.setCurrentIndex(self.scope_combo.findData("selected_repos"))
         self.current_result = None
         self.current_accessible_repositories = []
         if not self._defaults_initialized:
@@ -884,7 +897,12 @@ class ContributionHistoryTab(QWidget):
     def _set_default_dates(self):
         self.preset_combo.setCurrentIndex(self.preset_combo.findData("12m"))
         self._apply_date_preset()
-        self.scope_combo.setCurrentIndex(self.scope_combo.findData("selected_repos"))
+        default_scope = (
+            "contributed_repos"
+            if (self.config.get_provider() or "bitbucket").lower() == "bitbucket"
+            else "selected_repos"
+        )
+        self.scope_combo.setCurrentIndex(self.scope_combo.findData(default_scope))
         self.contribution_type_combo.setCurrentIndex(self.contribution_type_combo.findData("merged_prs"))
 
     def _apply_date_preset(self):
@@ -933,6 +951,15 @@ class ContributionHistoryTab(QWidget):
     def _on_scope_mode_changed(self):
         scope_mode = self.scope_combo.currentData()
         self.custom_repo_combo.setVisible(scope_mode == "custom_repos")
+        if scope_mode == "contributed_repos":
+            self.query_hint_label.setText(
+                "Fast scope: Bitbucket finds repositories from this developer's merged PRs first. "
+                "Direct-commit-only repositories require All repos."
+            )
+        else:
+            self.query_hint_label.setText(
+                "Tip: Use scope + contribution type first, then add branch/search filters only if needed."
+            )
         self._refresh_developer_suggestions()
 
     def _on_custom_repo_changed(self):
@@ -1045,6 +1072,10 @@ class ContributionHistoryTab(QWidget):
             scope_mode = self.scope_combo.currentData()
             if scope_mode == "custom_repos":
                 repositories = self.custom_repo_combo.checked_items()
+            elif scope_mode == "contributed_repos":
+                repositories = self.scope_manager.get_selected_repositories()
+                if not repositories:
+                    repositories = self.current_accessible_repositories[:10]
             else:
                 scope = self.scope_manager.resolve_scope(scope_mode)
                 repositories = list(scope.repositories)
