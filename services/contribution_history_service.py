@@ -16,7 +16,7 @@ from models.contribution_models import (
     RepositoryRef,
     normalize_record_datetime,
 )
-from services.provider_api import ProviderClient
+from services.provider_api import ProviderClient, bitbucket_request_stats
 from services.scope_manager import ScopeManager
 
 _TICKET_PATTERN = re.compile(r"\b([A-Z]{2,10}-\d+)\b")
@@ -39,6 +39,7 @@ class ContributionHistoryService:
         self.scope_manager = scope_manager
         self._query_cache: dict[tuple, list[dict]] = {}
         self._pr_commit_cache: dict[tuple, set[str]] = {}
+        self._prefetched_prs: dict[str, list[dict]] = {}
 
     def build_default_developer(self) -> str:
         user = self.provider.validate_credentials()
@@ -48,17 +49,32 @@ class ContributionHistoryService:
         self,
         query: ContributionHistoryQuery,
         progress_callback: Optional[Callable[[str], None]] = None,
+        partial_result_callback: Optional[
+            Callable[[ContributionHistoryResult, int, int], None]
+        ] = None,
         cancel_token: Optional[CancelToken] = None,
     ) -> ContributionHistoryResult:
         def notify(message: str) -> None:
             if progress_callback:
                 progress_callback(message)
 
+        request_start, retry_start = bitbucket_request_stats()
+
+        def notify_scan(message: str) -> None:
+            if (self.provider.provider_name or "").lower() == "bitbucket":
+                request_count, retry_count = bitbucket_request_stats()
+                message += (
+                    f" • {request_count - request_start} API requests"
+                    f" • {retry_count - retry_start} retries"
+                )
+            notify(message)
+
         self.provider.validate_credentials()
         # Always run with fresh fetch state so previous partial/rate-limited
         # snapshots do not pin future runs to incomplete results.
         self._query_cache.clear()
         self._pr_commit_cache.clear()
+        self._prefetched_prs.clear()
         if query.scope_repositories is not None:
             repositories = tuple(query.scope_repositories)
             scope = ContributionScope(
@@ -68,14 +84,33 @@ class ContributionHistoryService:
             )
         elif query.scope_type == "contributed_repos":
             notify("Discovering repositories from the developer's Bitbucket pull requests…")
-            repositories = tuple(
-                self.provider.list_contributed_repositories(
+            discover = getattr(self.provider, "discover_contributed_repositories", None)
+            if callable(discover):
+                discovery = discover(
                     developer=query.developer,
                     start_date=query.start_date,
                     end_date=query.end_date,
+                    search_text=query.search_text,
+                    branch_filter=query.branch_filter,
+                    exclude_bots=query.exclude_bots,
                     cancel_check=cancel_token.is_cancelled if cancel_token else None,
                 )
-            )
+                repositories = tuple(discovery.repositories)
+                self._prefetched_prs = {
+                    key: list(records)
+                    for key, records in discovery.pull_requests_by_repository.items()
+                }
+                for repository in repositories:
+                    self._prefetched_prs.setdefault(repository.key, [])
+            else:
+                repositories = tuple(
+                    self.provider.list_contributed_repositories(
+                        developer=query.developer,
+                        start_date=query.start_date,
+                        end_date=query.end_date,
+                        cancel_check=cancel_token.is_cancelled if cancel_token else None,
+                    )
+                )
             scope = ContributionScope(
                 scope_type="contributed_repos",
                 repositories=repositories,
@@ -96,6 +131,23 @@ class ContributionHistoryService:
         represented_commits: set[str] = set()
         repositories = list(scope.repositories)
         rate_limited_repos: list[RepositoryRef] = []
+        completed_repositories: list[RepositoryRef] = []
+
+        def emit_partial() -> None:
+            if not partial_result_callback:
+                return
+            partial_result_callback(
+                self._build_result(
+                    records=records,
+                    represented_commits=represented_commits,
+                    query=query,
+                    scope=scope,
+                    repositories_scanned=tuple(completed_repositories),
+                    partial_errors=partial_errors,
+                ),
+                len(completed_repositories),
+                len(repositories),
+            )
 
         if len(repositories) <= 1:
             for index, repository in enumerate(repositories, start=1):
@@ -110,6 +162,9 @@ class ContributionHistoryService:
                     partial_errors.append(f"{repository.display_name}: {exc}")
                     if self._is_rate_limited_error(exc):
                         rate_limited_repos.append(repository)
+                completed_repositories.append(repository)
+                notify_scan(f"Scanned {repository.display_name} ({index}/{len(repositories)})")
+                emit_partial()
         else:
             if (self.provider.provider_name or "").lower() == "bitbucket":
                 # Bitbucket rate limits can trigger even on small multi-repo batches.
@@ -135,7 +190,6 @@ class ContributionHistoryService:
                     for future in done:
                         repository = future_to_repo[future]
                         completed += 1
-                        notify(f"Scanned {repository.display_name} ({completed}/{len(repositories)})")
                         try:
                             repo_records, repo_pr_commits = future.result()
                             records.extend(repo_records)
@@ -144,6 +198,11 @@ class ContributionHistoryService:
                             partial_errors.append(f"{repository.display_name}: {exc}")
                             if self._is_rate_limited_error(exc):
                                 rate_limited_repos.append(repository)
+                        completed_repositories.append(repository)
+                        notify_scan(
+                            f"Scanned {repository.display_name} ({completed}/{len(repositories)})"
+                        )
+                        emit_partial()
                     if cancel_token and cancel_token.is_cancelled():
                         for future in pending:
                             future.cancel()
@@ -157,7 +216,7 @@ class ContributionHistoryService:
             # Additional passes for 429 repos, fully sequential with cooldown.
             dedup_retry: dict[str, RepositoryRef] = {repo.key: repo for repo in rate_limited_repos}
             remaining = list(dedup_retry.values())
-            max_rounds = 3
+            max_rounds = 1
             for round_index in range(max_rounds):
                 if not remaining or (cancel_token and cancel_token.is_cancelled()):
                     break
@@ -166,7 +225,7 @@ class ContributionHistoryService:
                 for index, repository in enumerate(remaining, start=1):
                     if cancel_token and cancel_token.is_cancelled():
                         break
-                    notify(
+                    notify_scan(
                         f"Retry round {round_index + 1}/{max_rounds} for rate-limited repo "
                         f"{index}/{len(remaining)}: {repository.display_name}"
                     )
@@ -186,8 +245,27 @@ class ContributionHistoryService:
                             next_remaining.append(repository)
                 remaining = next_remaining
 
-        records = self._deduplicate_records(records, represented_commits, query)
-        records.sort(
+        return self._build_result(
+            records=records,
+            represented_commits=represented_commits,
+            query=query,
+            scope=scope,
+            repositories_scanned=scope.repositories,
+            partial_errors=partial_errors,
+        )
+
+    def _build_result(
+        self,
+        *,
+        records: list[ContributionRecord],
+        represented_commits: set[str],
+        query: ContributionHistoryQuery,
+        scope: ContributionScope,
+        repositories_scanned: tuple[RepositoryRef, ...],
+        partial_errors: list[str],
+    ) -> ContributionHistoryResult:
+        result_records = self._deduplicate_records(list(records), represented_commits, query)
+        result_records.sort(
             key=lambda record: (
                 record.effective_date or datetime.min,
                 record.repository_display.lower(),
@@ -195,19 +273,19 @@ class ContributionHistoryService:
             ),
             reverse=True,
         )
-        grouped_records = self._group_records(records, query.group_by)
-
         return ContributionHistoryResult(
-            records=records,
-            repositories_scanned=scope.repositories,
+            records=result_records,
+            repositories_scanned=repositories_scanned,
             scope=scope,
-            partial_errors=partial_errors,
-            grouped_records=grouped_records,
-            total_prs=sum(1 for record in records if record.record_type == "pr"),
-            total_commits=sum(1 for record in records if record.record_type == "commit"),
-            active_repositories=tuple(sorted({record.repository_display for record in records})),
-            top_repositories=self._top_repositories(records),
-            ticket_prefixes=self._top_ticket_prefixes(records),
+            partial_errors=list(partial_errors),
+            grouped_records=self._group_records(result_records, query.group_by),
+            total_prs=sum(1 for record in result_records if record.record_type == "pr"),
+            total_commits=sum(1 for record in result_records if record.record_type == "commit"),
+            active_repositories=tuple(
+                sorted({record.repository_display for record in result_records})
+            ),
+            top_repositories=self._top_repositories(result_records),
+            ticket_prefixes=self._top_ticket_prefixes(result_records),
         )
 
     def execute_file_history_query(
@@ -303,21 +381,24 @@ class ContributionHistoryService:
         needs_pr_commit_dedupe = query.contribution_type == "prs_and_commits"
 
         if wants_prs:
-            pull_requests = self._get_or_fetch(
-                "prs",
-                repository,
-                query,
-                lambda: self.provider.list_merged_pull_requests(
+            if repository.key in self._prefetched_prs:
+                pull_requests = list(self._prefetched_prs[repository.key])
+            else:
+                pull_requests = self._get_or_fetch(
+                    "prs",
                     repository,
-                    developer=query.developer,
-                    start_date=query.start_date,
-                    end_date=query.end_date,
-                    search_text=query.search_text,
-                    branch_filter=query.branch_filter,
-                    exclude_bots=query.exclude_bots,
-                    cancel_check=cancel_token.is_cancelled if cancel_token else None,
-                ),
-            )
+                    query,
+                    lambda: self.provider.list_merged_pull_requests(
+                        repository,
+                        developer=query.developer,
+                        start_date=query.start_date,
+                        end_date=query.end_date,
+                        search_text=query.search_text,
+                        branch_filter=query.branch_filter,
+                        exclude_bots=query.exclude_bots,
+                        cancel_check=cancel_token.is_cancelled if cancel_token else None,
+                    ),
+                )
             for pr in pull_requests:
                 if cancel_token and cancel_token.is_cancelled():
                     break

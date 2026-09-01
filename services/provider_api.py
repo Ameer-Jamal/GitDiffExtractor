@@ -19,10 +19,26 @@ _BITBUCKET_HOST = "api.bitbucket.org"
 _BITBUCKET_CONCURRENCY = threading.Semaphore(1)
 _BITBUCKET_RATE_LOCK = threading.Lock()
 _BITBUCKET_NEXT_REQUEST_TS = 0.0
+_BITBUCKET_STATS_LOCK = threading.Lock()
+_BITBUCKET_REQUEST_COUNT = 0
+_BITBUCKET_RETRY_COUNT = 0
 
 
 def _should_cancel(cancel_check: CancelCheck) -> bool:
     return bool(cancel_check and cancel_check())
+
+
+def bitbucket_request_stats() -> tuple[int, int]:
+    with _BITBUCKET_STATS_LOCK:
+        return _BITBUCKET_REQUEST_COUNT, _BITBUCKET_RETRY_COUNT
+
+
+def _record_bitbucket_request(*, retry: bool = False) -> None:
+    global _BITBUCKET_REQUEST_COUNT, _BITBUCKET_RETRY_COUNT
+    with _BITBUCKET_STATS_LOCK:
+        _BITBUCKET_REQUEST_COUNT += 1
+        if retry:
+            _BITBUCKET_RETRY_COUNT += 1
 
 
 def _apply_bitbucket_rate_limit(url: str):
@@ -47,7 +63,7 @@ def _get_bitbucket_page_with_resume(
     *,
     auth,
     timeout: int = 20,
-    max_resume_attempts: int = 4,
+    max_resume_attempts: int = 0,
 ):
     attempt = 0
     while True:
@@ -70,13 +86,14 @@ def _get_json_with_retry(
     auth=None,
     headers=None,
     timeout: int = 20,
-    max_attempts: int = 12,
+    max_attempts: int = 4,
 ):
     last_error = None
     is_bitbucket = _BITBUCKET_HOST in (url or "")
     for attempt in range(max_attempts):
         _apply_bitbucket_rate_limit(url)
         if is_bitbucket:
+            _record_bitbucket_request(retry=attempt > 0)
             with _BITBUCKET_CONCURRENCY:
                 response = requests.get(url, params=params, auth=auth, headers=headers, timeout=timeout)
         else:
@@ -90,7 +107,7 @@ def _get_json_with_retry(
                 sleep_seconds = 0.8 * (2 ** attempt)
             if response.status_code == 429:
                 sleep_seconds = max(sleep_seconds, 3.0 + (attempt * 1.5))
-            time.sleep(min(90.0, max(0.7, sleep_seconds)))
+            time.sleep(min(10.0, max(0.7, sleep_seconds)))
             continue
         try:
             response.raise_for_status()
@@ -115,6 +132,12 @@ class ProviderUser:
     username: str
     display_name: str = ""
     email: str = ""
+
+
+@dataclass(frozen=True)
+class ContributionRepositoryDiscovery:
+    repositories: tuple[RepositoryRef, ...]
+    pull_requests_by_repository: dict[str, tuple[dict, ...]]
 
 
 class ProviderClient(ABC):
@@ -145,6 +168,24 @@ class ProviderClient(ABC):
         raise ValueError(
             f"Fast contributed-repository discovery is not supported for {self.provider_name}."
         )
+
+    def discover_contributed_repositories(
+        self,
+        developer: str,
+        start_date: Optional[date],
+        end_date: Optional[date],
+        search_text: str = "",
+        branch_filter: str = "",
+        exclude_bots: bool = True,
+        cancel_check: CancelCheck = None,
+    ) -> ContributionRepositoryDiscovery:
+        repositories = self.list_contributed_repositories(
+            developer,
+            start_date,
+            end_date,
+            cancel_check=cancel_check,
+        )
+        return ContributionRepositoryDiscovery(tuple(repositories), {})
 
     @abstractmethod
     def list_merged_pull_requests(
@@ -434,6 +475,24 @@ class BitbucketProviderClient(ProviderClient):
         end_date: Optional[date],
         cancel_check: CancelCheck = None,
     ) -> list[RepositoryRef]:
+        discovery = self.discover_contributed_repositories(
+            developer=developer,
+            start_date=start_date,
+            end_date=end_date,
+            cancel_check=cancel_check,
+        )
+        return list(discovery.repositories)
+
+    def discover_contributed_repositories(
+        self,
+        developer: str,
+        start_date: Optional[date],
+        end_date: Optional[date],
+        search_text: str = "",
+        branch_filter: str = "",
+        exclude_bots: bool = True,
+        cancel_check: CancelCheck = None,
+    ) -> ContributionRepositoryDiscovery:
         """Discover target repositories from PRs authored by a user in the workspace."""
         username, password = self._auth()
         workspace = self._workspace()
@@ -455,6 +514,7 @@ class BitbucketProviderClient(ProviderClient):
             cancel_check=cancel_check,
         )
         repositories: dict[str, RepositoryRef] = {}
+        pull_requests_by_repository: dict[str, list[dict]] = {}
         query_parts = []
         if start_date:
             query_parts.append(f'updated_on >= "{start_date.isoformat()}T00:00:00Z"')
@@ -465,7 +525,7 @@ class BitbucketProviderClient(ProviderClient):
         for selected_user in selected_users:
             if _should_cancel(cancel_check):
                 break
-            params = ["state=MERGED", "pagelen=50", "sort=-updated_on"]
+            params = ["state=MERGED", "pagelen=100", "sort=-updated_on"]
             if query_parts:
                 params.append(f"q={requests.utils.quote(' AND '.join(query_parts), safe='')}")
             encoded_user = requests.utils.quote(selected_user, safe="")
@@ -488,9 +548,66 @@ class BitbucketProviderClient(ProviderClient):
                     )
                     if repository:
                         repositories[repository.key] = repository
+                        if self._workspace_pr_matches_query(
+                            pull_request,
+                            start_date=start_date,
+                            end_date=end_date,
+                            search_text=search_text,
+                            branch_filter=branch_filter,
+                            exclude_bots=exclude_bots,
+                        ):
+                            pull_requests_by_repository.setdefault(repository.key, []).append(
+                                pull_request
+                            )
                 next_url = data.get("next")
 
-        return sorted(repositories.values(), key=lambda repo: repo.display_name.lower())
+        sorted_repositories = tuple(
+            sorted(repositories.values(), key=lambda repo: repo.display_name.lower())
+        )
+        return ContributionRepositoryDiscovery(
+            repositories=sorted_repositories,
+            pull_requests_by_repository={
+                key: tuple(records)
+                for key, records in pull_requests_by_repository.items()
+            },
+        )
+
+    def _workspace_pr_matches_query(
+        self,
+        pull_request: dict,
+        *,
+        start_date: Optional[date],
+        end_date: Optional[date],
+        search_text: str,
+        branch_filter: str,
+        exclude_bots: bool,
+    ) -> bool:
+        author_obj = pull_request.get("author") or {}
+        author = author_obj.get("display_name") or ""
+        username = author_obj.get("username") or ""
+        nickname = author_obj.get("nickname") or ""
+        summary = (
+            (pull_request.get("summary") or {}).get("raw")
+            or pull_request.get("description")
+            or ""
+        )
+        source_branch = (
+            ((pull_request.get("source") or {}).get("branch") or {}).get("name") or ""
+        )
+        destination_branch = (
+            ((pull_request.get("destination") or {}).get("branch") or {}).get("name") or ""
+        )
+        if self._exclude_bot(author or nickname or username, exclude_bots):
+            return False
+        return (
+            self._matches_search(
+                pull_request.get("title") or "",
+                summary,
+                search_text=search_text,
+            )
+            and self._matches_branch(branch_filter, source_branch, destination_branch)
+            and self._is_date_in_range(pull_request.get("updated_on"), start_date, end_date)
+        )
 
     def _resolve_contribution_users(
         self,

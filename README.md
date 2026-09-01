@@ -66,6 +66,8 @@ Git providers already contain the context an AI needs, but that context is scatt
 
 In `Contribution History`, use **Contributed repos (fast, PR-discovered)** to avoid scanning every Bitbucket repository. RepoLens asks Bitbucket for merged PRs authored by the selected developer across the workspace, extracts the distinct target repositories, and scans only that shortlist. This scope is complete for authored PR history. A repository where the developer only pushed direct commits and never authored a PR cannot be discovered by Bitbucket's workspace PR API; use **All repos** when that exhaustive commit coverage is required.
 
+Contribution results appear as each repository finishes. For the fast Bitbucket scope, RepoLens reuses the workspace pull-request response instead of downloading the same PRs again per repository. The running status includes provider request and retry counts; retries are bounded so a persistent provider error returns partial results instead of silently waiting through several long retry rounds.
+
 ---
 
 ## **MCP Server**
