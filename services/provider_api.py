@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import re
 import threading
 import time
@@ -97,6 +97,10 @@ def _get_json_with_retry(
             return response.json()
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            if isinstance(exc, requests.HTTPError):
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status and 400 <= status < 500 and status != 429:
+                    raise
             if attempt < (max_attempts - 1):
                 time.sleep(min(45.0, 0.8 * (2 ** attempt)))
                 continue
@@ -130,6 +134,17 @@ class ProviderClient(ABC):
     @abstractmethod
     def current_repository(self) -> Optional[RepositoryRef]:
         raise NotImplementedError
+
+    def list_contributed_repositories(
+        self,
+        developer: str,
+        start_date: Optional[date],
+        end_date: Optional[date],
+        cancel_check: CancelCheck = None,
+    ) -> list[RepositoryRef]:
+        raise ValueError(
+            f"Fast contributed-repository discovery is not supported for {self.provider_name}."
+        )
 
     @abstractmethod
     def list_merged_pull_requests(
@@ -411,6 +426,196 @@ class BitbucketProviderClient(ProviderClient):
             next_url = data.get("next")
 
         return repositories
+
+    def list_contributed_repositories(
+        self,
+        developer: str,
+        start_date: Optional[date],
+        end_date: Optional[date],
+        cancel_check: CancelCheck = None,
+    ) -> list[RepositoryRef]:
+        """Discover target repositories from PRs authored by a user in the workspace."""
+        username, password = self._auth()
+        workspace = self._workspace()
+        developer_terms = [
+            value.strip()
+            for value in re.split(r"[,;\n]+", developer or "")
+            if value.strip()
+        ]
+        if not developer_terms:
+            raise ValueError(
+                "A developer is required for the fast contributed-repositories scope."
+            )
+        if not workspace:
+            raise ValueError("Bitbucket workspace is required.")
+
+        selected_users = self._resolve_contribution_users(
+            developer_terms,
+            auth=(username, password),
+            cancel_check=cancel_check,
+        )
+        repositories: dict[str, RepositoryRef] = {}
+        query_parts = []
+        if start_date:
+            query_parts.append(f'updated_on >= "{start_date.isoformat()}T00:00:00Z"')
+        if end_date:
+            exclusive_end = end_date + timedelta(days=1)
+            query_parts.append(f'updated_on < "{exclusive_end.isoformat()}T00:00:00Z"')
+
+        for selected_user in selected_users:
+            if _should_cancel(cancel_check):
+                break
+            params = ["state=MERGED", "pagelen=50", "sort=-updated_on"]
+            if query_parts:
+                params.append(f"q={requests.utils.quote(' AND '.join(query_parts), safe='')}")
+            encoded_user = requests.utils.quote(selected_user, safe="")
+            next_url = (
+                f"https://api.bitbucket.org/2.0/workspaces/{workspace}/"
+                f"pullrequests/{encoded_user}?{'&'.join(params)}"
+            )
+            while next_url:
+                if _should_cancel(cancel_check):
+                    break
+                data = _get_bitbucket_page_with_resume(
+                    next_url,
+                    auth=(username, password),
+                    timeout=20,
+                )
+                for pull_request in data.get("values", []):
+                    repository = self._repository_from_workspace_pull_request(
+                        pull_request,
+                        default_workspace=workspace,
+                    )
+                    if repository:
+                        repositories[repository.key] = repository
+                next_url = data.get("next")
+
+        return sorted(repositories.values(), key=lambda repo: repo.display_name.lower())
+
+    def _resolve_contribution_users(
+        self,
+        developer_terms: list[str],
+        *,
+        auth,
+        cancel_check: CancelCheck = None,
+    ) -> list[str]:
+        """Resolve display names and configured email aliases to stable Bitbucket UUIDs."""
+        resolved: list[str] = []
+        unresolved = list(developer_terms)
+        try:
+            if not _should_cancel(cancel_check):
+                current_user = _get_json_with_retry(
+                    "https://api.bitbucket.org/2.0/user",
+                    auth=auth,
+                    timeout=20,
+                )
+                current_candidates = (
+                    current_user.get("display_name") or "",
+                    current_user.get("nickname") or "",
+                    current_user.get("username") or "",
+                    current_user.get("account_id") or "",
+                    current_user.get("uuid") or "",
+                    self._auth()[0],
+                )
+                current_identifier = (
+                    current_user.get("uuid")
+                    or current_user.get("username")
+                    or current_user.get("nickname")
+                    or ""
+                )
+                unresolved = []
+                for term in developer_terms:
+                    if current_identifier and self._matches_developer(
+                        *current_candidates,
+                        developer=term,
+                    ):
+                        resolved.append(current_identifier)
+                    else:
+                        unresolved.append(term)
+        except Exception:  # noqa: BLE001 - user-profile scope is optional
+            pass
+
+        # For another developer, translate a display name/nickname to a UUID.
+        # This is still a workspace-level paginated read, not one request per repo.
+        if unresolved and not _should_cancel(cancel_check):
+            matched_terms: set[str] = set()
+            next_url = (
+                f"https://api.bitbucket.org/2.0/workspaces/{self._workspace()}/"
+                "members?pagelen=100"
+            )
+            try:
+                while next_url and len(matched_terms) < len(unresolved):
+                    if _should_cancel(cancel_check):
+                        break
+                    data = _get_bitbucket_page_with_resume(next_url, auth=auth, timeout=20)
+                    for membership in data.get("values", []):
+                        user = membership.get("user") or membership
+                        identifier = (
+                            user.get("uuid")
+                            or user.get("username")
+                            or user.get("nickname")
+                            or ""
+                        )
+                        if not identifier:
+                            continue
+                        candidates = (
+                            user.get("display_name") or "",
+                            user.get("nickname") or "",
+                            user.get("username") or "",
+                            user.get("account_id") or "",
+                            user.get("uuid") or "",
+                        )
+                        for term in unresolved:
+                            if term.lower() in matched_terms:
+                                continue
+                            if self._matches_developer(*candidates, developer=term):
+                                resolved.append(identifier)
+                                matched_terms.add(term.lower())
+                    next_url = data.get("next")
+            except Exception:  # noqa: BLE001 - workspace-member scope is optional
+                pass
+            resolved.extend(
+                term for term in unresolved if term.lower() not in matched_terms
+            )
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in resolved:
+            key = value.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(value.strip())
+        return deduped
+
+    @staticmethod
+    def _repository_from_workspace_pull_request(
+        pull_request: dict,
+        *,
+        default_workspace: str,
+    ) -> Optional[RepositoryRef]:
+        destination = pull_request.get("destination") or {}
+        repo = destination.get("repository") or {}
+        full_name = (repo.get("full_name") or "").strip()
+        workspace = ((repo.get("workspace") or {}).get("slug") or "").strip()
+        slug = (repo.get("slug") or "").strip()
+        if full_name and "/" in full_name:
+            workspace_from_name, slug_from_name = full_name.split("/", 1)
+            workspace = workspace or workspace_from_name
+            slug = slug or slug_from_name
+        workspace = workspace or default_workspace
+        if not slug:
+            return None
+        full_name = full_name or f"{workspace}/{slug}"
+        html_url = ((repo.get("links") or {}).get("html") or {}).get("href", "")
+        return RepositoryRef(
+            provider="bitbucket",
+            workspace=workspace,
+            slug=slug,
+            display_name=full_name,
+            full_name=full_name,
+            web_url=html_url or f"https://bitbucket.org/{full_name}",
+        )
 
     def list_merged_pull_requests(
         self,

@@ -45,6 +45,10 @@ class ScopeManager:
 
     def resolve_scope(self, scope_type: str) -> ContributionScope:
         scope_type = (scope_type or "current_repo").strip().lower()
+        if scope_type == "contributed_repos":
+            raise ValueError(
+                "Contributed repositories require a developer and date range from a contribution query."
+            )
         if scope_type == "all_repos":
             repositories = tuple(self.list_accessible_repositories())
             return ContributionScope(

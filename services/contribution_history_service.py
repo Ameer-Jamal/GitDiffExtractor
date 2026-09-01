@@ -66,9 +66,29 @@ class ContributionHistoryService:
                 repositories=repositories,
                 label=query.scope_label_override or f"{query.scope_type} ({len(repositories)})",
             )
+        elif query.scope_type == "contributed_repos":
+            notify("Discovering repositories from the developer's Bitbucket pull requests…")
+            repositories = tuple(
+                self.provider.list_contributed_repositories(
+                    developer=query.developer,
+                    start_date=query.start_date,
+                    end_date=query.end_date,
+                    cancel_check=cancel_token.is_cancelled if cancel_token else None,
+                )
+            )
+            scope = ContributionScope(
+                scope_type="contributed_repos",
+                repositories=repositories,
+                label=f"PR-discovered repositories ({len(repositories)})",
+            )
         else:
             scope = self.scope_manager.resolve_scope(query.scope_type)
         if not scope.repositories:
+            if query.scope_type == "contributed_repos":
+                raise ValueError(
+                    "No repositories with merged pull requests by the selected developer "
+                    "were found in this date range. Use All repos for an exhaustive commit scan."
+                )
             raise ValueError("No repositories available for the selected scope.")
 
         records: list[ContributionRecord] = []
@@ -94,7 +114,7 @@ class ContributionHistoryService:
             if (self.provider.provider_name or "").lower() == "bitbucket":
                 # Bitbucket rate limits can trigger even on small multi-repo batches.
                 # Use adaptive concurrency to favor completeness over throughput.
-                if len(repositories) >= 4 or query.scope_type == "all_repos":
+                if len(repositories) >= 4 or query.scope_type in {"all_repos", "contributed_repos"}:
                     max_workers = 1
                 else:
                     max_workers = min(2, len(repositories))

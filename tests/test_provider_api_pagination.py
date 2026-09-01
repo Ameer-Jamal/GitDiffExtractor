@@ -1,9 +1,11 @@
 from datetime import date
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import requests
 
 from models.contribution_models import RepositoryRef
-from services.provider_api import BitbucketProviderClient, GitHubProviderClient
+from services.provider_api import BitbucketProviderClient, GitHubProviderClient, _get_json_with_retry
 
 
 class _FakeConfig:
@@ -29,6 +31,19 @@ class _FakeConfig:
 class ProviderPaginationRegressionTests(unittest.TestCase):
     def setUp(self):
         self.config = _FakeConfig()
+
+    @patch("services.provider_api.requests.get")
+    def test_non_transient_client_error_is_not_retried(self, mock_get):
+        response = MagicMock()
+        response.status_code = 404
+        error = requests.HTTPError(response=response)
+        response.raise_for_status.side_effect = error
+        mock_get.return_value = response
+
+        with self.assertRaises(requests.HTTPError):
+            _get_json_with_retry("https://api.github.com/missing", max_attempts=12)
+
+        self.assertEqual(mock_get.call_count, 1)
 
     @patch("services.provider_api._get_json_with_retry")
     def test_github_merged_prs_does_not_short_circuit_on_old_merged_at(self, mock_get_json):
@@ -136,6 +151,117 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
 
         self.assertEqual([record["id"] for record in records], [12])
         self.assertEqual(mock_get_page.call_count, 2)
+
+    @patch("services.provider_api._get_bitbucket_page_with_resume")
+    @patch("services.provider_api._get_json_with_retry")
+    def test_bitbucket_discovers_distinct_contributed_repositories_from_workspace_prs(
+        self,
+        mock_get_json,
+        mock_get_page,
+    ):
+        mock_get_json.return_value = {
+            "display_name": "Ameer Jamal",
+            "nickname": "ameerjamal",
+            "uuid": "{user-uuid}",
+        }
+        mock_get_page.side_effect = [
+            {
+                "values": [
+                    {
+                        "id": 10,
+                        "destination": {
+                            "repository": {
+                                "slug": "api",
+                                "full_name": "workspace/api",
+                                "workspace": {"slug": "workspace"},
+                                "links": {
+                                    "html": {"href": "https://bitbucket.org/workspace/api"}
+                                },
+                            }
+                        },
+                    }
+                ],
+                "next": "https://api.bitbucket.org/2.0/workspaces/workspace/pullrequests/page-2",
+            },
+            {
+                "values": [
+                    {
+                        "id": 11,
+                        "destination": {
+                            "repository": {
+                                "slug": "api",
+                                "full_name": "workspace/api",
+                            }
+                        },
+                    },
+                    {
+                        "id": 12,
+                        "destination": {
+                            "repository": {
+                                "slug": "web",
+                                "full_name": "workspace/web",
+                            }
+                        },
+                    },
+                ],
+                "next": None,
+            },
+        ]
+
+        client = BitbucketProviderClient(self.config)
+        repositories = client.list_contributed_repositories(
+            developer="Ameer Jamal",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 3, 31),
+        )
+
+        self.assertEqual([repo.full_name for repo in repositories], ["workspace/api", "workspace/web"])
+        first_url = mock_get_page.call_args_list[0].args[0]
+        self.assertIn("/workspaces/workspace/pullrequests/%7Buser-uuid%7D", first_url)
+        self.assertIn("state=MERGED", first_url)
+        self.assertIn("updated_on%20%3E%3D", first_url)
+        self.assertIn("updated_on%20%3C", first_url)
+
+    @patch("services.provider_api._get_bitbucket_page_with_resume")
+    @patch("services.provider_api._get_json_with_retry")
+    def test_bitbucket_resolves_another_developer_from_workspace_members(
+        self,
+        mock_get_json,
+        mock_get_page,
+    ):
+        mock_get_json.return_value = {
+            "display_name": "Current User",
+            "nickname": "current-user",
+            "uuid": "{current-uuid}",
+        }
+        mock_get_page.side_effect = [
+            {
+                "values": [
+                    {
+                        "user": {
+                            "display_name": "Alice Example",
+                            "nickname": "alice",
+                            "uuid": "{alice-uuid}",
+                        }
+                    }
+                ],
+                "next": None,
+            },
+            {"values": [], "next": None},
+        ]
+
+        client = BitbucketProviderClient(self.config)
+        repositories = client.list_contributed_repositories(
+            developer="Alice Example",
+            start_date=None,
+            end_date=None,
+        )
+
+        self.assertEqual(repositories, [])
+        member_url = mock_get_page.call_args_list[0].args[0]
+        pr_url = mock_get_page.call_args_list[1].args[0]
+        self.assertIn("/members?pagelen=100", member_url)
+        self.assertIn("/pullrequests/%7Balice-uuid%7D", pr_url)
 
 
 if __name__ == "__main__":

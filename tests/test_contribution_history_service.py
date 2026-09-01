@@ -10,6 +10,7 @@ class _FakeProvider:
 
     def __init__(self):
         self.pr_commit_calls = 0
+        self.discovery_calls = []
 
     def validate_credentials(self):
         class _User:
@@ -43,6 +44,24 @@ class _FakeProvider:
                 "links": {"html": {"href": "https://example/pr/42"}},
                 "description": "Implements AD-316",
             }
+        ]
+
+    def list_contributed_repositories(
+        self,
+        developer,
+        start_date,
+        end_date,
+        cancel_check=None,
+    ):
+        self.discovery_calls.append((developer, start_date, end_date))
+        return [
+            RepositoryRef(
+                provider="bitbucket",
+                workspace="example-workspace",
+                slug="backend-service",
+                display_name="example-workspace/backend-service",
+                full_name="example-workspace/backend-service",
+            )
         ]
 
     def list_pull_request_commits(self, repository, pr_record, cancel_check=None):
@@ -146,6 +165,25 @@ class ContributionHistoryServiceTests(unittest.TestCase):
         self.assertEqual(result.total_prs, 1)
         self.assertEqual(result.total_commits, 0)
         self.assertEqual(self.provider.pr_commit_calls, 0)
+
+    def test_contributed_repo_scope_discovers_repositories_before_scanning(self):
+        result = self.service.execute_query(
+            ContributionHistoryQuery(
+                developer="Ameer Jamal",
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 12, 31),
+                scope_type="contributed_repos",
+                contribution_type="merged_prs",
+            )
+        )
+
+        self.assertEqual(
+            self.provider.discovery_calls,
+            [("Ameer Jamal", date(2026, 1, 1), date(2026, 12, 31))],
+        )
+        self.assertEqual(result.scope.scope_type, "contributed_repos")
+        self.assertEqual(result.scope.label, "PR-discovered repositories (1)")
+        self.assertEqual([repo.slug for repo in result.repositories_scanned], ["backend-service"])
 
 
 if __name__ == "__main__":
