@@ -91,7 +91,8 @@ The MCP server is read-only for provider data. It may clone or fetch local repos
 - `find_pr_for_commit` (Link commits to their parent PRs)
 - `search_contributions_by_ticket` (Deep search across repositories for a ticket)
 - `analyze_file_history` (Unified commit and PR history for a specific file)
-- `get_pr_context` (Unified tool to get PR metadata and diff from a URL, ticket, or title)
+- `get_pr_context` (Unified tool to get PR metadata and diff from a URL, ticket, or title, with optional comment threads)
+- `get_pr_comments` (Fetch comments and review threads on a PR with file paths, line numbers, code context snippets, and AI-ready summary)
 - `list_developer_candidates`
 - `create_pull_request` (Create one GitHub or Bitbucket PR from an existing remote branch)
 - `get_git_repository_context` (Infer provider, repository, remote, branch, and auth context from a local Git checkout)
@@ -103,7 +104,7 @@ For AI-driven PR creation, a good workflow is:
 3. Use `repo_dir` or explicit `provider`/`workspace`/`slug` when calling PR tools so the MCP does not depend on the desktop app's active repository.
 4. Call `create_pull_request` with `source_branch`, `target_branch`, `title`, and `description`.
 
-`list_pull_requests`, `get_pr_diff`, `get_commit_diff`, `create_pull_request`, and `update_pull_request` accept `repo_dir` for local-checkout-based repository inference. `create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME` (your Atlassian email), and `REPOLENS_BITBUCKET_API_TOKEN` over relying on the desktop app's currently selected repository.
+`list_pull_requests`, `get_pr_diff`, `get_commit_diff`, `get_pr_comments`, `create_pull_request`, and `update_pull_request` accept `repo_dir` for local-checkout-based repository inference. `create_pull_request` does not edit files, create commits, push branches, or mutate RepoLens app configuration. For MCP automation, prefer environment variables such as `REPOLENS_GITHUB_TOKEN`, `REPOLENS_BITBUCKET_USERNAME` (your Atlassian email), and `REPOLENS_BITBUCKET_API_TOKEN` over relying on the desktop app's currently selected repository.
 
 ### **General Setup**
 
@@ -355,6 +356,23 @@ Rules:
 - Notes/Comments should include PR ids, repository names, and any uncertainty.
 - If no PRs are found for a ticket, say that directly.
 - If any diff is truncated or failed, mention that in Notes/Comments.
+```
+
+Addressing PR comments with AI prompt:
+
+```text
+Use the RepoLens MCP server to inspect and address unresolved comments on PR #42 (or pass reference="<PR_URL_OR_TICKET>").
+
+Call get_pr_comments with:
+reference="<PR_URL_OR_NUMBER>"
+unresolved_only=true
+include_code_context=true
+
+For each unresolved review comment:
+1. Note the exact file path and line number.
+2. Review the reviewer's feedback and the surrounding code context.
+3. Open the file, make the requested fixes or improvements, and verify the changes.
+4. Provide a clear summary of how each comment was addressed.
 ```
 
 ---
