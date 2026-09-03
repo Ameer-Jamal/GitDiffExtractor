@@ -16,6 +16,7 @@ from services.diff_service import DiffService
 from headless_config import HeadlessConfig
 from services.provider_api import build_provider_client
 from services.pull_request_service import PullRequestService
+from services.pull_request_comment_service import PullRequestCommentService
 from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService, PullRequestUpdateRequest
 from services.scope_manager import ScopeManager
 
@@ -48,6 +49,7 @@ class RepoLensMCPBackend:
         self.scope_manager = ScopeManager(self.config, self.provider)
         self.history_service = ContributionHistoryService(self.provider, self.scope_manager)
         self.pr_service = PullRequestService(self.config)
+        self.pr_comment_service = PullRequestCommentService(self.config, pr_service=self.pr_service)
         self.pr_creation_service = PullRequestCreationService(self.config)
         self.git_context_service = GitContextService()
         self.diff_service = DiffService()
@@ -679,7 +681,7 @@ class RepoLensMCPBackend:
         }
 
         if include_comments:
-            comments_res = self.pr_service.get_pull_request_comments(
+            comments_res = self.pr_comment_service.get_pull_request_comments(
                 repo,
                 pr.get("id"),
                 repo_dir=repo_dir,
@@ -736,7 +738,7 @@ class RepoLensMCPBackend:
 
         effective_repo_dir = repo_dir or repo.get("local_dir") or self.config.get_repo_dir()
 
-        result = self.pr_service.get_pull_request_comments(
+        result = self.pr_comment_service.get_pull_request_comments(
             repo,
             resolved_pr_id,
             unresolved_only=unresolved_only,
@@ -747,6 +749,294 @@ class RepoLensMCPBackend:
         )
         result["repository"] = self._repo_identity(repo)
         return result
+
+    def add_pr_comment(
+        self,
+        body: str,
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        file_path: str = "",
+        line: Optional[int] = None,
+        side: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Add a general or inline comment to a pull request."""
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        comment = self.pr_comment_service.add_comment(
+            repo,
+            resolved_pr_id,
+            body,
+            file_path=file_path or None,
+            line=line,
+            side=side or None,
+        )
+        return {
+            "repository": self._repo_identity(repo),
+            "pr_id": resolved_pr_id,
+            "comment": comment,
+        }
+
+    def reply_to_pr_comment(
+        self,
+        parent_id: str | int,
+        body: str,
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Reply to an existing comment thread on a pull request."""
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        comment = self.pr_comment_service.reply_to_comment(
+            repo,
+            resolved_pr_id,
+            parent_id,
+            body,
+        )
+        return {
+            "repository": self._repo_identity(repo),
+            "pr_id": resolved_pr_id,
+            "parent_id": parent_id,
+            "comment": comment,
+        }
+
+    def reply_to_pr_comments(
+        self,
+        replies: list[dict[str, Any]],
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Reply to several existing comment threads on one pull request."""
+        if not replies:
+            raise ValueError("At least one reply is required.")
+
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        results: list[dict[str, Any]] = []
+        for reply in replies:
+            comment_id = reply.get("comment_id")
+            body = reply.get("body")
+            try:
+                comment = self.pr_comment_service.reply_to_comment(
+                    repo,
+                    resolved_pr_id,
+                    comment_id,
+                    body,
+                )
+                results.append({
+                    "comment_id": comment_id,
+                    "success": True,
+                    "comment": comment,
+                })
+            except Exception as exc:  # Keep independent replies from hiding partial success.
+                results.append({
+                    "comment_id": comment_id,
+                    "success": False,
+                    "error": str(exc),
+                })
+
+        succeeded = sum(1 for result in results if result["success"])
+        return {
+            "repository": self._repo_identity(repo),
+            "pr_id": resolved_pr_id,
+            "summary": {
+                "requested": len(results),
+                "succeeded": succeeded,
+                "failed": len(results) - succeeded,
+            },
+            "results": results,
+        }
+
+    def edit_pr_comment(
+        self,
+        comment_id: str | int,
+        body: str,
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Edit an existing comment on a pull request."""
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        comment = self.pr_comment_service.edit_comment(
+            repo,
+            resolved_pr_id,
+            comment_id,
+            body,
+        )
+        return {
+            "repository": self._repo_identity(repo),
+            "pr_id": resolved_pr_id,
+            "comment_id": comment_id,
+            "comment": comment,
+        }
+
+    def delete_pr_comment(
+        self,
+        comment_id: str | int,
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Delete a comment from a pull request."""
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        result = self.pr_comment_service.delete_comment(
+            repo,
+            resolved_pr_id,
+            comment_id,
+        )
+        return {
+            "repository": self._repo_identity(repo),
+            "pr_id": resolved_pr_id,
+            **result,
+        }
 
     def resolve_repository(
         self,
@@ -1257,6 +1547,191 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             comment_type=comment_type,
             file_path=file_path,
             include_code_context=include_code_context,
+        )
+
+    @app.tool()
+    def add_pr_comment(
+        body: str,
+        pr_id: str = "",
+        reference: str = "",
+        file_path: str = "",
+        line: Optional[int] = None,
+        side: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Add a general comment or an inline code review comment to a pull request.
+
+        Args:
+            body: The text of the comment to post.
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
+            file_path: Optional relative file path for inline code comments (e.g. "src/main.py").
+            line: Optional line number for inline code comments.
+            side: Optional diff side ('to'/'right' for added/modified, 'from'/'left' for deleted).
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.add_pr_comment(
+            body=body,
+            pr_id=pr_id,
+            reference=reference,
+            file_path=file_path,
+            line=line,
+            side=side,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def reply_to_pr_comment(
+        comment_id: str,
+        body: str,
+        pr_id: str = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Reply to an existing comment thread on a pull request.
+
+        Args:
+            comment_id: The ID of the comment to reply to.
+            body: The text of the reply.
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.reply_to_pr_comment(
+            parent_id=comment_id,
+            body=body,
+            pr_id=pr_id,
+            reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def reply_to_pr_comments(
+        replies: list[dict[str, Any]],
+        pr_id: str = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Reply to multiple comment threads on the same pull request in one call.
+
+        Args:
+            replies: Items containing a comment_id and body. Each reply is attempted independently.
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID, or PR number/title search.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.reply_to_pr_comments(
+            replies=replies,
+            pr_id=pr_id,
+            reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def edit_pr_comment(
+        comment_id: str,
+        body: str,
+        pr_id: str = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Edit an existing comment on a pull request.
+
+        Args:
+            comment_id: The ID of the comment to edit.
+            body: The updated text of the comment.
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.edit_pr_comment(
+            comment_id=comment_id,
+            body=body,
+            pr_id=pr_id,
+            reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def delete_pr_comment(
+        comment_id: str,
+        pr_id: str = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Delete a comment from a pull request.
+
+        Args:
+            comment_id: The ID of the comment to delete.
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.delete_pr_comment(
+            comment_id=comment_id,
+            pr_id=pr_id,
+            reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
         )
 
     @app.tool()
