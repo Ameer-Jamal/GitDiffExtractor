@@ -447,7 +447,7 @@ def test_update_pull_request_can_infer_repo_from_repo_dir():
 
 def test_get_pr_comments_with_pr_id(mock_backend):
     backend, provider = mock_backend
-    with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+    with patch.object(backend.pr_comment_service, "get_pull_request_comments") as mock_comments:
         mock_comments.return_value = {
             "summary": {"total_comments": 2, "unresolved_threads": 1},
             "threads": [{"thread_id": 1, "resolved": False}],
@@ -477,7 +477,7 @@ def test_get_pr_comments_with_reference(mock_backend):
     resolved_pr = {"id": 99, "title": "Feature"}
 
     with patch.object(backend, "resolve_pr_from_reference", return_value=(resolved_repo, resolved_pr)):
-        with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+        with patch.object(backend.pr_comment_service, "get_pull_request_comments") as mock_comments:
             mock_comments.return_value = {
                 "summary": {"total_comments": 1},
                 "threads": [],
@@ -518,7 +518,7 @@ def test_get_pr_context_includes_comments_when_requested(mock_backend):
                     destination_commit="dst",
                     merge_commit="merge",
                 )
-                with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+                with patch.object(backend.pr_comment_service, "get_pull_request_comments") as mock_comments:
                     mock_comments.return_value = {
                         "summary": {"total_comments": 3, "unresolved_threads": 2},
                         "threads": [{"thread_id": 10}],
@@ -533,3 +533,76 @@ def test_get_pr_context_includes_comments_when_requested(mock_backend):
                     assert "threads" in result
                     assert result["comment_summary"]["total_comments"] == 3
                     assert result["comments_formatted"] == "Summary of comments"
+
+
+def test_add_pr_comment(mock_backend):
+    backend, _ = mock_backend
+    with patch.object(backend.pr_comment_service, "add_comment") as mock_add:
+        mock_add.return_value = {"id": 123, "body": "Great job!", "comment_type": "general"}
+        res = backend.add_pr_comment(body="Great job!", pr_id="42")
+        assert res["pr_id"] == "42"
+        assert res["comment"]["id"] == 123
+        mock_add.assert_called_once()
+
+
+def test_reply_to_pr_comment(mock_backend):
+    backend, _ = mock_backend
+    with patch.object(backend.pr_comment_service, "reply_to_comment") as mock_reply:
+        mock_reply.return_value = {"id": 124, "parent_id": 123, "body": "Fixed"}
+        res = backend.reply_to_pr_comment(parent_id="123", body="Fixed", pr_id="42")
+        assert res["pr_id"] == "42"
+        assert res["parent_id"] == "123"
+        assert res["comment"]["id"] == 124
+        mock_reply.assert_called_once()
+
+
+def test_reply_to_pr_comments_reports_partial_success(mock_backend):
+    backend, _ = mock_backend
+    with patch.object(backend.pr_comment_service, "reply_to_comment") as mock_reply:
+        mock_reply.side_effect = [
+            {"id": 201, "parent_id": 101, "body": "Done"},
+            RuntimeError("Bitbucket rejected the reply"),
+        ]
+
+        res = backend.reply_to_pr_comments(
+            replies=[
+                {"comment_id": "101", "body": "Done"},
+                {"comment_id": "102", "body": "Still investigating"},
+            ],
+            pr_id="42",
+        )
+
+        assert res["summary"] == {"requested": 2, "succeeded": 1, "failed": 1}
+        assert res["results"][0]["success"] is True
+        assert res["results"][1] == {
+            "comment_id": "102",
+            "success": False,
+            "error": "Bitbucket rejected the reply",
+        }
+        assert mock_reply.call_count == 2
+
+
+def test_reply_to_pr_comments_requires_replies(mock_backend):
+    backend, _ = mock_backend
+    with pytest.raises(ValueError, match="At least one reply"):
+        backend.reply_to_pr_comments(replies=[], pr_id="42")
+
+
+def test_edit_pr_comment(mock_backend):
+    backend, _ = mock_backend
+    with patch.object(backend.pr_comment_service, "edit_comment") as mock_edit:
+        mock_edit.return_value = {"id": 123, "body": "Updated comment"}
+        res = backend.edit_pr_comment(comment_id="123", body="Updated comment", pr_id="42")
+        assert res["comment_id"] == "123"
+        assert res["comment"]["body"] == "Updated comment"
+        mock_edit.assert_called_once()
+
+
+def test_delete_pr_comment(mock_backend):
+    backend, _ = mock_backend
+    with patch.object(backend.pr_comment_service, "delete_comment") as mock_delete:
+        mock_delete.return_value = {"success": True, "comment_id": 123, "deleted": True}
+        res = backend.delete_pr_comment(comment_id="123", pr_id="42")
+        assert res["success"] is True
+        assert res["comment_id"] == 123
+        mock_delete.assert_called_once()
