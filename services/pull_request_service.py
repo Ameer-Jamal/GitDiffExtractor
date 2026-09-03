@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -488,3 +489,619 @@ class PullRequestService:
             }
         
         return None
+
+    def get_pull_request_comments(
+        self,
+        repo: dict,
+        pr_id: str | int,
+        *,
+        unresolved_only: bool = False,
+        comment_type: str = "all",
+        file_path: str = "",
+        repo_dir: str = "",
+        include_code_context: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch normalized comments and threads for a PR with code context and AI summary."""
+        provider = (repo.get("provider") or self.config.get_provider() or "bitbucket").lower()
+        effective_repo_dir = repo_dir or repo.get("local_dir") or ""
+
+        try:
+            pr = self.get_pull_request(repo, pr_id)
+        except Exception:
+            pr = {"id": pr_id, "title": f"Pull Request #{pr_id}", "state": "OPEN", "author": ""}
+
+        reviews_data: list[dict] = []
+        if provider == "github":
+            raw_review_comments, raw_issue_comments, raw_reviews = self._fetch_github_comments(repo, pr_id)
+            resolution_map = self._fetch_github_resolution_status(repo, pr_id)
+            normalized_comments = [
+                self._map_github_review_comment(c, resolution_map)
+                for c in raw_review_comments
+            ]
+            normalized_comments.extend(
+                self._map_github_issue_comment(c)
+                for c in raw_issue_comments
+            )
+            for r in raw_reviews:
+                rev = self._map_github_review_summary(r)
+                if rev:
+                    reviews_data.append(rev)
+                    normalized_comments.append(rev)
+        else:
+            raw_comments = self._fetch_bitbucket_comments(repo, pr_id)
+            child_parent_ids = {
+                c.get("parent", {}).get("id")
+                for c in raw_comments
+                if c.get("parent", {}).get("id")
+            }
+            normalized_comments = [
+                self._map_bitbucket_comment(c)
+                for c in raw_comments
+                if not c.get("deleted") or c.get("id") in child_parent_ids
+            ]
+
+        # Extract local code snippet for inline comments if requested
+        if include_code_context and effective_repo_dir:
+            for c in normalized_comments:
+                if c.get("file_path") and c.get("line"):
+                    c["code_snippet"] = self._extract_local_code_context(
+                        effective_repo_dir, c["file_path"], c["line"]
+                    )
+
+        # Build threads and apply filters
+        threads, filtered_comments = self._build_comment_threads(
+            normalized_comments,
+            unresolved_only=unresolved_only,
+            comment_type=comment_type,
+            file_path_filter=file_path,
+        )
+
+        all_threads, _ = self._build_comment_threads(normalized_comments)
+        files_with_comments = sorted(list({
+            t["file_path"] for t in all_threads if t.get("file_path")
+        }))
+        unresolved_count = sum(1 for t in all_threads if not t["resolved"])
+        resolved_count = sum(1 for t in all_threads if t["resolved"])
+        inline_count = sum(1 for t in all_threads if t["comment_type"] == "inline")
+        general_count = sum(1 for t in all_threads if t["comment_type"] != "inline")
+
+        summary = {
+            "total_comments": len(normalized_comments),
+            "total_threads": len(all_threads),
+            "unresolved_threads": unresolved_count,
+            "resolved_threads": resolved_count,
+            "inline_threads": inline_count,
+            "general_threads": general_count,
+            "filtered_threads": len(threads),
+            "filtered_comments": len(filtered_comments),
+            "files_with_comments": files_with_comments,
+        }
+
+        formatted_summary = self._format_ai_comments_summary(repo, pr, threads, summary)
+
+        return {
+            "repository": self._attach_repo_context({}, repo),
+            "pr": pr,
+            "repo_dir": effective_repo_dir,
+            "summary": summary,
+            "threads": threads,
+            "comments": filtered_comments,
+            "reviews": reviews_data,
+            "formatted_summary": formatted_summary,
+        }
+
+    def _fetch_bitbucket_comments(self, repo: dict, pr_id: str | int) -> list[dict]:
+        config = self._get_bitbucket_config(repo)
+        url = (
+            f"https://api.bitbucket.org/2.0/repositories/"
+            f"{config['workspace']}/{config['slug']}/pullrequests/{pr_id}/comments"
+        )
+        params = {"pagelen": 100}
+        comments: list[dict] = []
+        while url:
+            response = requests.get(
+                url,
+                params=params,
+                auth=(config["username"], config["password"]),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            comments.extend(payload.get("values", []))
+            url = payload.get("next")
+            params = None
+        return comments
+
+    def _fetch_github_comments(
+        self, repo: dict, pr_id: str | int
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        config = self._get_github_config(repo)
+        headers = config["headers"]
+
+        review_comments: list[dict] = []
+        url = f"https://api.github.com/repos/{config['owner']}/{config['repo']}/pulls/{pr_id}/comments"
+        params = {"per_page": 100}
+        while url:
+            response = requests.get(url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            review_comments.extend(response.json())
+            url = self._github_next_link(response.headers.get("Link"))
+            params = None
+
+        issue_comments: list[dict] = []
+        url = f"https://api.github.com/repos/{config['owner']}/{config['repo']}/issues/{pr_id}/comments"
+        params = {"per_page": 100}
+        while url:
+            response = requests.get(url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            issue_comments.extend(response.json())
+            url = self._github_next_link(response.headers.get("Link"))
+            params = None
+
+        reviews: list[dict] = []
+        url = f"https://api.github.com/repos/{config['owner']}/{config['repo']}/pulls/{pr_id}/reviews"
+        params = {"per_page": 100}
+        while url:
+            response = requests.get(url, params=params, headers=headers, timeout=20)
+            response.raise_for_status()
+            reviews.extend(response.json())
+            url = self._github_next_link(response.headers.get("Link"))
+            params = None
+
+        return review_comments, issue_comments, reviews
+
+    def _fetch_github_resolution_status(self, repo: dict, pr_id: str | int) -> dict[int, bool]:
+        config = self._get_github_config(repo)
+        token = (self.config.get_github_token() or "").strip()
+        if not token:
+            return {}
+
+        try:
+            pr_number = int(pr_id)
+        except (ValueError, TypeError):
+            return {}
+
+        query = """
+        query($owner: String!, $repo: String!, $pr: Int!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $pr) {
+              reviewThreads(first: 100) {
+                nodes {
+                  id
+                  isResolved
+                  isOutdated
+                  comments(first: 100) {
+                    nodes {
+                      databaseId
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        try:
+            resp = requests.post(
+                "https://api.github.com/graphql",
+                headers={
+                    "Authorization": f"bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": query,
+                    "variables": {
+                        "owner": config["owner"],
+                        "repo": config["repo"],
+                        "pr": pr_number,
+                    },
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                threads = (
+                    data.get("data", {})
+                    .get("repository", {})
+                    .get("pullRequest", {})
+                    .get("reviewThreads", {})
+                    .get("nodes", [])
+                )
+                resolved_map: dict[int, bool] = {}
+                for t in threads:
+                    is_res = bool(t.get("isResolved"))
+                    for c in t.get("comments", {}).get("nodes", []):
+                        cid = c.get("databaseId")
+                        if cid is not None:
+                            resolved_map[cid] = is_res
+                return resolved_map
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _map_bitbucket_comment(raw: dict) -> dict:
+        user = raw.get("user") or {}
+        content = raw.get("content") or {}
+        inline = raw.get("inline")
+        parent = raw.get("parent") or {}
+        links = raw.get("links") or {}
+        resolution = raw.get("resolution")
+
+        is_inline = inline is not None and isinstance(inline, dict)
+        file_path = inline.get("path") if is_inline else None
+        line_to = inline.get("to") if is_inline else None
+        line_from = inline.get("from") if is_inline else None
+        line = line_to if line_to is not None else line_from
+        side = "to" if line_to is not None else ("from" if line_from is not None else None)
+        outdated = bool(inline.get("outdated")) if is_inline else False
+
+        resolved = resolution is not None
+        resolved_by = None
+        resolved_on = None
+        if isinstance(resolution, dict):
+            resolved_by = (resolution.get("resolved_by") or {}).get("display_name")
+            resolved_on = resolution.get("resolved_on")
+
+        author = (
+            user.get("display_name")
+            or user.get("nickname")
+            or user.get("username")
+            or "Unknown"
+        )
+        author_username = user.get("nickname") or user.get("username") or user.get("display_name") or ""
+        html_url = (links.get("html") or {}).get("href") or ""
+
+        body = content.get("raw") or ""
+        if raw.get("deleted") and not body:
+            body = "*(comment deleted)*"
+
+        return {
+            "id": raw.get("id"),
+            "parent_id": parent.get("id"),
+            "comment_type": "inline" if is_inline else "general",
+            "author": author,
+            "author_username": author_username,
+            "author_display_name": user.get("display_name") or "",
+            "body": body,
+            "created_at": raw.get("created_on") or "",
+            "updated_at": raw.get("updated_on") or "",
+            "html_url": html_url,
+            "file_path": file_path,
+            "line": line,
+            "original_line": line,
+            "start_line": None,
+            "side": side,
+            "diff_hunk": None,
+            "code_snippet": None,
+            "resolved": resolved,
+            "resolved_by": resolved_by,
+            "resolved_on": resolved_on,
+            "outdated": outdated,
+            "deleted": bool(raw.get("deleted")),
+        }
+
+    @staticmethod
+    def _map_github_review_comment(raw: dict, resolved_map: dict[int, bool] | None = None) -> dict:
+        user = raw.get("user") or {}
+        cid = raw.get("id")
+        resolved = (resolved_map or {}).get(cid, False)
+
+        return {
+            "id": cid,
+            "parent_id": raw.get("in_reply_to_id"),
+            "comment_type": "inline",
+            "author": user.get("login") or "Unknown",
+            "author_username": user.get("login") or "",
+            "author_display_name": user.get("login") or "",
+            "body": raw.get("body") or "",
+            "created_at": raw.get("created_at") or "",
+            "updated_at": raw.get("updated_at") or "",
+            "html_url": raw.get("html_url") or "",
+            "file_path": raw.get("path"),
+            "line": raw.get("line") or raw.get("original_line"),
+            "original_line": raw.get("original_line"),
+            "start_line": raw.get("start_line") or raw.get("original_start_line"),
+            "side": raw.get("side") or "RIGHT",
+            "diff_hunk": raw.get("diff_hunk"),
+            "code_snippet": None,
+            "resolved": resolved,
+            "resolved_by": None,
+            "resolved_on": None,
+            "outdated": raw.get("position") is None,
+            "review_id": raw.get("pull_request_review_id"),
+            "deleted": False,
+        }
+
+    @staticmethod
+    def _map_github_issue_comment(raw: dict) -> dict:
+        user = raw.get("user") or {}
+        return {
+            "id": raw.get("id"),
+            "parent_id": None,
+            "comment_type": "general",
+            "author": user.get("login") or "Unknown",
+            "author_username": user.get("login") or "",
+            "author_display_name": user.get("login") or "",
+            "body": raw.get("body") or "",
+            "created_at": raw.get("created_at") or "",
+            "updated_at": raw.get("updated_at") or "",
+            "html_url": raw.get("html_url") or "",
+            "file_path": None,
+            "line": None,
+            "original_line": None,
+            "start_line": None,
+            "side": None,
+            "diff_hunk": None,
+            "code_snippet": None,
+            "resolved": False,
+            "resolved_by": None,
+            "resolved_on": None,
+            "outdated": False,
+            "review_id": None,
+            "deleted": False,
+        }
+
+    @staticmethod
+    def _map_github_review_summary(raw: dict) -> Optional[dict]:
+        body = (raw.get("body") or "").strip()
+        state = (raw.get("state") or "").upper()
+        if not body and state not in {"CHANGES_REQUESTED", "COMMENTED"}:
+            return None
+        user = raw.get("user") or {}
+        text = body if body else f"Review submitted with state: {state}"
+        return {
+            "id": raw.get("id"),
+            "parent_id": None,
+            "comment_type": "review",
+            "review_state": state,
+            "author": user.get("login") or "Unknown",
+            "author_username": user.get("login") or "",
+            "author_display_name": user.get("login") or "",
+            "body": text,
+            "created_at": raw.get("submitted_at") or "",
+            "updated_at": raw.get("submitted_at") or "",
+            "html_url": raw.get("html_url") or "",
+            "file_path": None,
+            "line": None,
+            "original_line": None,
+            "start_line": None,
+            "side": None,
+            "diff_hunk": None,
+            "code_snippet": None,
+            "resolved": state == "APPROVED",
+            "resolved_by": None,
+            "resolved_on": None,
+            "outdated": False,
+            "review_id": raw.get("id"),
+            "deleted": False,
+        }
+
+    @staticmethod
+    def _extract_local_code_context(
+        repo_dir: str,
+        file_path: str,
+        line: int,
+        context_lines: int = 3,
+    ) -> Optional[str]:
+        if not repo_dir or not file_path or not line or line <= 0:
+            return None
+        try:
+            full_path = os.path.join(repo_dir, file_path)
+            if not os.path.isfile(full_path):
+                return None
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            start = max(1, line - context_lines)
+            end = min(len(lines), line + context_lines)
+            formatted = []
+            for l_num in range(start, end + 1):
+                marker = ">" if l_num == line else " "
+                line_content = lines[l_num - 1].rstrip("\r\n")
+                formatted.append(f"{marker} {l_num:4d} | {line_content}")
+            return "\n".join(formatted)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build_comment_threads(
+        comments: list[dict],
+        *,
+        unresolved_only: bool = False,
+        comment_type: str = "all",
+        file_path_filter: str = "",
+    ) -> tuple[list[dict], list[dict]]:
+        comments_by_id = {c["id"]: c for c in comments if c.get("id") is not None}
+
+        def get_root_id(comment: dict) -> Any:
+            curr = comment
+            visited = set()
+            while curr.get("parent_id") and curr["parent_id"] in comments_by_id and curr["id"] not in visited:
+                visited.add(curr["id"])
+                curr = comments_by_id[curr["parent_id"]]
+            return curr.get("parent_id") if (curr.get("parent_id") and curr.get("parent_id") not in comments_by_id) else curr["id"]
+
+        thread_map: dict[Any, list[dict]] = {}
+        for c in comments:
+            root_id = get_root_id(c)
+            thread_map.setdefault(root_id, []).append(c)
+
+        threads: list[dict] = []
+        for root_id, thread_comments in thread_map.items():
+            thread_comments.sort(key=lambda x: str(x.get("created_at") or ""))
+            root = thread_comments[0]
+            for c in thread_comments:
+                if c.get("parent_id") is None or c.get("id") == root_id:
+                    root = c
+                    break
+
+            replies = [c for c in thread_comments if c != root]
+
+            file_path = root.get("file_path")
+            line = root.get("line")
+            start_line = root.get("start_line")
+            side = root.get("side")
+            diff_hunk = root.get("diff_hunk")
+            code_snippet = root.get("code_snippet")
+            comment_kind = root.get("comment_type") or "general"
+
+            if not file_path:
+                for c in thread_comments:
+                    if c.get("file_path"):
+                        file_path = c.get("file_path")
+                        line = c.get("line")
+                        start_line = c.get("start_line")
+                        side = c.get("side")
+                        diff_hunk = c.get("diff_hunk")
+                        code_snippet = c.get("code_snippet")
+                        comment_kind = "inline"
+                        break
+
+            is_resolved = any(bool(c.get("resolved")) for c in thread_comments)
+            is_outdated = any(bool(c.get("outdated")) for c in thread_comments)
+            resolved_by = next((c.get("resolved_by") for c in thread_comments if c.get("resolved_by")), None)
+            resolved_on = next((c.get("resolved_on") for c in thread_comments if c.get("resolved_on")), None)
+
+            thread = {
+                "thread_id": root.get("id") or root_id,
+                "comment_type": comment_kind,
+                "file_path": file_path,
+                "line": line,
+                "start_line": start_line,
+                "side": side,
+                "diff_hunk": diff_hunk,
+                "code_snippet": code_snippet,
+                "resolved": is_resolved,
+                "resolved_by": resolved_by,
+                "resolved_on": resolved_on,
+                "outdated": is_outdated,
+                "root_comment": root,
+                "replies": replies,
+                "reply_count": len(replies),
+                "latest_comment": thread_comments[-1],
+            }
+            threads.append(thread)
+
+        filtered_threads: list[dict] = []
+        for t in threads:
+            if unresolved_only and t["resolved"]:
+                continue
+            if comment_type == "inline" and t["comment_type"] != "inline":
+                continue
+            if comment_type == "general" and t["comment_type"] == "inline":
+                continue
+            if file_path_filter:
+                t_path = (t["file_path"] or "").lower()
+                filter_path = file_path_filter.strip().lower()
+                if filter_path not in t_path:
+                    continue
+            filtered_threads.append(t)
+
+        def thread_sort_key(t: dict):
+            return (
+                0 if t["comment_type"] == "inline" else 1,
+                t["file_path"] or "",
+                t["line"] or 0,
+                str(t["root_comment"].get("created_at") or ""),
+            )
+        filtered_threads.sort(key=thread_sort_key)
+
+        filtered_comments: list[dict] = []
+        for t in filtered_threads:
+            filtered_comments.append(t["root_comment"])
+            filtered_comments.extend(t["replies"])
+
+        return filtered_threads, filtered_comments
+
+    @staticmethod
+    def _format_ai_comments_summary(
+        repo: dict,
+        pr: dict,
+        threads: list[dict],
+        summary: dict,
+    ) -> str:
+        repo_label = (
+            repo.get("full_name")
+            or repo.get("repo_label")
+            or f"{repo.get('owner', '')}/{repo.get('slug', '')}".strip("/")
+        )
+        pr_id = pr.get("id") or ""
+        pr_title = pr.get("title") or ""
+        pr_state = pr.get("state") or ""
+        author = pr.get("author") or ""
+
+        lines = [
+            f"# PR #{pr_id}: {pr_title}".strip(),
+            f"**Repository**: {repo_label} | **State**: {pr_state} | **Author**: {author}",
+            f"**Summary**: {summary['total_comments']} comments across {summary['total_threads']} threads "
+            f"({summary['unresolved_threads']} unresolved, {summary['resolved_threads']} resolved)",
+        ]
+
+        if summary.get("files_with_comments"):
+            files_str = ", ".join(f"`{f}`" for f in summary["files_with_comments"])
+            lines.append(f"**Files with Comments**: {files_str}")
+        lines.append("")
+
+        if not threads:
+            lines.append("No comments matching the requested criteria.")
+            return "\n".join(lines)
+
+        unresolved = [t for t in threads if not t["resolved"]]
+        resolved = [t for t in threads if t["resolved"]]
+
+        if unresolved:
+            lines.append(f"## Unresolved Threads ({len(unresolved)})")
+            lines.append("")
+            for idx, t in enumerate(unresolved, 1):
+                status_tags = ["[UNRESOLVED]"]
+                if t["comment_type"] == "inline":
+                    status_tags.append(f"[INLINE: `{t['file_path']}`:{t['line']}]")
+                else:
+                    status_tags.append("[GENERAL]")
+                if t.get("outdated"):
+                    status_tags.append("[OUTDATED DIFF]")
+
+                lines.append(f"### Thread {idx} {' '.join(status_tags)}")
+                if t["comment_type"] == "inline":
+                    lines.append(f"- **File**: `{t['file_path']}`")
+                    line_info = f"{t['line']}"
+                    if t.get("side"):
+                        line_info += f" (side: {t['side']})"
+                    lines.append(f"- **Line**: {line_info}")
+
+                    if t.get("code_snippet"):
+                        lines.append("- **Code Context**:")
+                        lines.append("```")
+                        lines.append(t["code_snippet"])
+                        lines.append("```")
+                    elif t.get("diff_hunk"):
+                        lines.append("- **Diff Context**:")
+                        lines.append("```diff")
+                        lines.append(t["diff_hunk"])
+                        lines.append("```")
+
+                root = t["root_comment"]
+                lines.append(f"- **Reviewer (@{root.get('author')})** ({root.get('created_at', '')}):")
+                body_lines = (root.get("body") or "").splitlines()
+                quoted_body = "\n".join(f"  > {line}" for line in body_lines) if body_lines else "  > *(empty comment)*"
+                lines.append(quoted_body)
+
+                if t.get("replies"):
+                    lines.append(f"- **Replies ({len(t['replies'])})**:")
+                    for reply in t["replies"]:
+                        reply_body = (reply.get("body") or "").strip()
+                        lines.append(f"  - **@{reply.get('author')}** ({reply.get('created_at', '')}): {reply_body}")
+                lines.append("")
+
+        if resolved:
+            lines.append(f"## Resolved Threads ({len(resolved)})")
+            lines.append("")
+            for idx, t in enumerate(resolved, 1):
+                target = f"`{t['file_path']}`:{t['line']}" if t["comment_type"] == "inline" else "General"
+                root = t["root_comment"]
+                snippet = (root.get("body") or "").strip().replace("\n", " ")[:100]
+                lines.append(f"- **[RESOLVED]** {target} by @{root.get('author')}: {snippet}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
+

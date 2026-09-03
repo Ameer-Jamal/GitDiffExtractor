@@ -2,6 +2,7 @@ from datetime import date
 import unittest
 
 from services.contribution_history_service import ContributionHistoryService
+from services.provider_api import ContributionRepositoryDiscovery
 from models.contribution_models import ContributionHistoryQuery, ContributionScope, RepositoryRef
 
 
@@ -11,6 +12,7 @@ class _FakeProvider:
     def __init__(self):
         self.pr_commit_calls = 0
         self.discovery_calls = []
+        self.pr_list_calls = 0
 
     def validate_credentials(self):
         class _User:
@@ -31,6 +33,7 @@ class _FakeProvider:
         exclude_bots=True,
         cancel_check=None,
     ):
+        self.pr_list_calls += 1
         return [
             {
                 "id": 42,
@@ -63,6 +66,39 @@ class _FakeProvider:
                 full_name="example-workspace/backend-service",
             )
         ]
+
+    def discover_contributed_repositories(
+        self,
+        developer,
+        start_date,
+        end_date,
+        search_text="",
+        branch_filter="",
+        exclude_bots=True,
+        cancel_check=None,
+    ):
+        repositories = self.list_contributed_repositories(
+            developer,
+            start_date,
+            end_date,
+            cancel_check=cancel_check,
+        )
+        pull_request = {
+            "id": 42,
+            "title": "AD-316 restore launchdarkly flags",
+            "state": "MERGED",
+            "author": {"display_name": "Ameer Jamal", "username": "ajamal"},
+            "source": {"branch": {"name": "feature/AD-316"}},
+            "destination": {"branch": {"name": "develop"}},
+            "created_on": "2026-02-01T10:00:00+00:00",
+            "updated_on": "2026-02-02T10:00:00+00:00",
+            "links": {"html": {"href": "https://example/pr/42"}},
+            "description": "Implements AD-316",
+        }
+        return ContributionRepositoryDiscovery(
+            repositories=tuple(repositories),
+            pull_requests_by_repository={repositories[0].key: (pull_request,)},
+        )
 
     def list_pull_request_commits(self, repository, pr_record, cancel_check=None):
         self.pr_commit_calls += 1
@@ -167,6 +203,7 @@ class ContributionHistoryServiceTests(unittest.TestCase):
         self.assertEqual(self.provider.pr_commit_calls, 0)
 
     def test_contributed_repo_scope_discovers_repositories_before_scanning(self):
+        partial_updates = []
         result = self.service.execute_query(
             ContributionHistoryQuery(
                 developer="Ameer Jamal",
@@ -174,7 +211,10 @@ class ContributionHistoryServiceTests(unittest.TestCase):
                 end_date=date(2026, 12, 31),
                 scope_type="contributed_repos",
                 contribution_type="merged_prs",
-            )
+            ),
+            partial_result_callback=lambda partial, completed, total: partial_updates.append(
+                (partial, completed, total)
+            ),
         )
 
         self.assertEqual(
@@ -184,6 +224,10 @@ class ContributionHistoryServiceTests(unittest.TestCase):
         self.assertEqual(result.scope.scope_type, "contributed_repos")
         self.assertEqual(result.scope.label, "PR-discovered repositories (1)")
         self.assertEqual([repo.slug for repo in result.repositories_scanned], ["backend-service"])
+        self.assertEqual(self.provider.pr_list_calls, 0)
+        self.assertEqual(len(partial_updates), 1)
+        self.assertEqual(partial_updates[0][1:], (1, 1))
+        self.assertEqual(partial_updates[0][0].total_prs, 1)
 
 
 if __name__ == "__main__":

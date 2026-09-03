@@ -63,6 +63,14 @@ class _FakeBackend:
     def get_pr_context(self, **kwargs):
         return {"repo_dir": kwargs.get("repo_dir", ""), "pr": {"id": 2430}, "diff_text": "diff --git"}
 
+    def get_pr_comments(self, **kwargs):
+        return {
+            "summary": {"total_comments": 2, "unresolved_threads": 1},
+            "threads": [{"thread_id": 101, "file_path": "auth.py", "line": 5, "resolved": False}],
+            "comments": [{"id": 101, "body": "Fix this"}],
+            "formatted_summary": "# PR #42 Comments",
+        }
+
 
 class _FakeStdin:
     def __init__(self, is_tty):
@@ -133,6 +141,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("update_pull_request", tool_names)
             self.assertIn("get_git_repository_context", tool_names)
             self.assertIn("get_pr_context", tool_names)
+            self.assertIn("get_pr_comments", tool_names)
 
             active_result = await session.call_tool("get_active_context", {})
             self.assertEqual(active_result.structuredContent["provider"], "github")
@@ -179,6 +188,13 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 {"reference": "https://bitbucket.org/example-workspace/backend-service/pull-requests/2430", "repo_dir": "/tmp/demo"},
             )
             self.assertEqual(pr_context_result.structuredContent["repo_dir"], "/tmp/demo")
+
+            pr_comments_result = await session.call_tool(
+                "get_pr_comments",
+                {"pr_id": "42", "unresolved_only": True},
+            )
+            self.assertEqual(pr_comments_result.structuredContent["summary"]["total_comments"], 2)
+            self.assertEqual(pr_comments_result.structuredContent["threads"][0]["file_path"], "auth.py")
 
             git_context_result = await session.call_tool("get_git_repository_context", {})
             self.assertEqual(git_context_result.structuredContent["default_branch"], "main")

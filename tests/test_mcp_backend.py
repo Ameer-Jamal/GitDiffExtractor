@@ -443,3 +443,93 @@ def test_update_pull_request_can_infer_repo_from_repo_dir():
     assert result["number"] == 2429
     repo_arg = mock_update.call_args.args[0]
     assert repo_arg["owner"] == "example-workspace"
+
+
+def test_get_pr_comments_with_pr_id(mock_backend):
+    backend, provider = mock_backend
+    with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+        mock_comments.return_value = {
+            "summary": {"total_comments": 2, "unresolved_threads": 1},
+            "threads": [{"thread_id": 1, "resolved": False}],
+            "comments": [{"id": 1}],
+            "formatted_summary": "# PR #42 Comments",
+        }
+
+        result = backend.get_pr_comments(pr_id="42", unresolved_only=True, comment_type="inline")
+
+        assert result["summary"]["total_comments"] == 2
+        assert result["repository"]["slug"] == "backend-service"
+        assert result["formatted_summary"] == "# PR #42 Comments"
+        mock_comments.assert_called_once()
+        _, kwargs = mock_comments.call_args
+        assert kwargs["unresolved_only"] is True
+        assert kwargs["comment_type"] == "inline"
+
+
+def test_get_pr_comments_with_reference(mock_backend):
+    backend, provider = mock_backend
+    resolved_repo = {
+        "provider": "github",
+        "owner": "openai",
+        "slug": "demo",
+        "full_name": "openai/demo",
+    }
+    resolved_pr = {"id": 99, "title": "Feature"}
+
+    with patch.object(backend, "resolve_pr_from_reference", return_value=(resolved_repo, resolved_pr)):
+        with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+            mock_comments.return_value = {
+                "summary": {"total_comments": 1},
+                "threads": [],
+                "comments": [],
+                "formatted_summary": "",
+            }
+
+            result = backend.get_pr_comments(reference="https://github.com/openai/demo/pull/99")
+
+            assert result["summary"]["total_comments"] == 1
+            assert mock_comments.call_args.args[1] == 99
+
+
+def test_get_pr_comments_missing_args(mock_backend):
+    backend, provider = mock_backend
+    with pytest.raises(ValueError, match="Either 'pr_id' or 'reference'"):
+        backend.get_pr_comments()
+
+
+def test_get_pr_context_includes_comments_when_requested(mock_backend):
+    backend, provider = mock_backend
+    resolved_repo = {
+        "provider": "github",
+        "owner": "openai",
+        "slug": "demo",
+        "full_name": "openai/demo",
+        "local_dir": "/tmp/demo",
+    }
+    resolved_pr = {"id": 55, "title": "Optimize"}
+
+    with patch.object(backend, "resolve_pr_from_reference", return_value=(resolved_repo, resolved_pr)):
+        with patch.object(backend, "_repo_dir", return_value="/tmp/demo"):
+            with patch.object(backend.diff_service, "generate_pr_diff") as mock_diff:
+                mock_diff.return_value = MagicMock(
+                    diff_text="diff --git",
+                    merge_base="base",
+                    source_commit="src",
+                    destination_commit="dst",
+                    merge_commit="merge",
+                )
+                with patch.object(backend.pr_service, "get_pull_request_comments") as mock_comments:
+                    mock_comments.return_value = {
+                        "summary": {"total_comments": 3, "unresolved_threads": 2},
+                        "threads": [{"thread_id": 10}],
+                        "comments": [{"id": 10}],
+                        "formatted_summary": "Summary of comments",
+                    }
+
+                    result = backend.get_pr_context(reference="RU-12345", include_comments=True)
+
+                    assert result["diff_text"] == "diff --git"
+                    assert "comments" in result
+                    assert "threads" in result
+                    assert result["comment_summary"]["total_comments"] == 3
+                    assert result["comments_formatted"] == "Summary of comments"

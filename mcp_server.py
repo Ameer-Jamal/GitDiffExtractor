@@ -610,7 +610,23 @@ class RepoLensMCPBackend:
                 )
                 return repo, pr
 
-        # 3. Try Search Text (Title/Branch)
+        # 3. Try Numeric PR ID (e.g. "42" or "#42")
+        numeric_ref = reference.lstrip("#").strip()
+        if numeric_ref.isdigit():
+            try:
+                repo = self.resolve_repository(
+                    provider=provider,
+                    workspace=workspace,
+                    slug=slug,
+                    repo_dir=repo_dir,
+                    allow_direct=bool(provider and workspace and slug) or bool(repo_dir),
+                )
+                pr = self.pr_service.get_pull_request(repo, numeric_ref)
+                return repo, pr
+            except Exception:
+                pass
+
+        # 4. Try Search Text (Title/Branch)
         selected = self._ticket_search_repositories(
             provider=provider,
             workspace=workspace,
@@ -636,6 +652,7 @@ class RepoLensMCPBackend:
         repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
+        include_comments: bool = False,
     ) -> dict[str, Any]:
         """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
         repo, pr = self.resolve_pr_from_reference(
@@ -649,7 +666,7 @@ class RepoLensMCPBackend:
         result = self.diff_service.generate_pr_diff(pr, repo_dir)
         diff_text, truncated = self._truncate_text(result.diff_text, _clamp_diff_limit(max_chars))
         
-        return {
+        response: dict[str, Any] = {
             "repository": self._repo_identity(repo),
             "pr": pr,
             "repo_dir": repo_dir,
@@ -660,6 +677,76 @@ class RepoLensMCPBackend:
             "destination_commit": result.destination_commit,
             "merge_commit": result.merge_commit,
         }
+
+        if include_comments:
+            comments_res = self.pr_service.get_pull_request_comments(
+                repo,
+                pr.get("id"),
+                repo_dir=repo_dir,
+                include_code_context=True,
+            )
+            response["comments"] = comments_res.get("comments", [])
+            response["threads"] = comments_res.get("threads", [])
+            response["comment_summary"] = comments_res.get("summary", {})
+            response["comments_formatted"] = comments_res.get("formatted_summary", "")
+
+        return response
+
+    def get_pr_comments(
+        self,
+        *,
+        pr_id: str | int = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+        unresolved_only: bool = False,
+        comment_type: str = "all",
+        file_path: str = "",
+        include_code_context: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch comments and review threads for a pull request with code context and AI summary."""
+        target_reference = (reference or "").strip()
+        target_pr_id = str(pr_id or "").strip()
+
+        if not target_reference and not target_pr_id:
+            raise ValueError("Either 'pr_id' or 'reference' (URL, ticket, or title/PR#) must be provided.")
+
+        if target_reference:
+            repo, pr = self.resolve_pr_from_reference(
+                target_reference,
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                repo_dir=repo_dir,
+            )
+            resolved_pr_id = pr.get("id") or target_pr_id
+        else:
+            repo = self.resolve_repository(
+                provider=provider,
+                workspace=workspace,
+                slug=slug,
+                scope=scope,
+                repo_dir=repo_dir,
+                allow_direct=True,
+            )
+            resolved_pr_id = target_pr_id
+
+        effective_repo_dir = repo_dir or repo.get("local_dir") or self.config.get_repo_dir()
+
+        result = self.pr_service.get_pull_request_comments(
+            repo,
+            resolved_pr_id,
+            unresolved_only=unresolved_only,
+            comment_type=comment_type,
+            file_path=file_path,
+            repo_dir=effective_repo_dir,
+            include_code_context=include_code_context,
+        )
+        result["repository"] = self._repo_identity(repo)
+        return result
 
     def resolve_repository(
         self,
@@ -1115,8 +1202,9 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
         repo_dir: str = "",
         ensure_checkout: bool = True,
         max_chars: int = DEFAULT_DIFF_CHAR_LIMIT,
+        include_comments: bool = False,
     ) -> dict[str, Any]:
-        """A unified tool to get both PR metadata and diff from a URL, ticket, or title."""
+        """A unified tool to get both PR metadata and diff from a URL, ticket, or title, with optional comments."""
         return backend.get_pr_context(
             reference=reference,
             provider=provider,
@@ -1125,6 +1213,50 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             repo_dir=repo_dir,
             ensure_checkout=ensure_checkout,
             max_chars=max_chars,
+            include_comments=include_comments,
+        )
+
+    @app.tool()
+    def get_pr_comments(
+        pr_id: str = "",
+        reference: str = "",
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+        unresolved_only: bool = False,
+        comment_type: str = "all",
+        file_path: str = "",
+        include_code_context: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch comments and review threads for a pull request with code context and AI-ready summary.
+
+        Args:
+            pr_id: Pull request number or ID (e.g. "42").
+            reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path (for local code snippet context).
+            unresolved_only: If True, returns only unresolved comments and threads.
+            comment_type: 'all', 'inline' (code diff comments only), or 'general' (PR conversation only).
+            file_path: Optional filter for comments on a specific file path.
+            include_code_context: If True, extracts surrounding code snippets from local checkout.
+        """
+        return backend.get_pr_comments(
+            pr_id=pr_id,
+            reference=reference,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            unresolved_only=unresolved_only,
+            comment_type=comment_type,
+            file_path=file_path,
+            include_code_context=include_code_context,
         )
 
     @app.tool()

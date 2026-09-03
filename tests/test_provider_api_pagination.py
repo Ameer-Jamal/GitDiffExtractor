@@ -45,6 +45,24 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
 
         self.assertEqual(mock_get.call_count, 1)
 
+    @patch("services.provider_api.time.sleep")
+    @patch("services.provider_api.requests.get")
+    def test_transient_bitbucket_errors_use_bounded_retry_attempts(
+        self,
+        mock_get,
+        _mock_sleep,
+    ):
+        response = MagicMock()
+        response.status_code = 500
+        response.headers = {}
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_get.return_value = response
+
+        with self.assertRaises(requests.HTTPError):
+            _get_json_with_retry("https://api.bitbucket.org/2.0/test")
+
+        self.assertEqual(mock_get.call_count, 4)
+
     @patch("services.provider_api._get_json_with_retry")
     def test_github_merged_prs_does_not_short_circuit_on_old_merged_at(self, mock_get_json):
         repo = RepositoryRef(
@@ -169,7 +187,12 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
                 "values": [
                     {
                         "id": 10,
+                        "title": "API change",
+                        "updated_on": "2026-02-10T12:00:00+00:00",
+                        "author": {"display_name": "Ameer Jamal", "nickname": "ameerjamal"},
+                        "source": {"branch": {"name": "feature/api"}},
                         "destination": {
+                            "branch": {"name": "main"},
                             "repository": {
                                 "slug": "api",
                                 "full_name": "workspace/api",
@@ -187,7 +210,12 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
                 "values": [
                     {
                         "id": 11,
+                        "title": "Another API change",
+                        "updated_on": "2026-02-11T12:00:00+00:00",
+                        "author": {"display_name": "Ameer Jamal", "nickname": "ameerjamal"},
+                        "source": {"branch": {"name": "feature/api-2"}},
                         "destination": {
+                            "branch": {"name": "main"},
                             "repository": {
                                 "slug": "api",
                                 "full_name": "workspace/api",
@@ -196,7 +224,12 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
                     },
                     {
                         "id": 12,
+                        "title": "Web change",
+                        "updated_on": "2026-02-12T12:00:00+00:00",
+                        "author": {"display_name": "Ameer Jamal", "nickname": "ameerjamal"},
+                        "source": {"branch": {"name": "feature/web"}},
                         "destination": {
+                            "branch": {"name": "main"},
                             "repository": {
                                 "slug": "web",
                                 "full_name": "workspace/web",
@@ -209,13 +242,22 @@ class ProviderPaginationRegressionTests(unittest.TestCase):
         ]
 
         client = BitbucketProviderClient(self.config)
-        repositories = client.list_contributed_repositories(
-            developer="Ameer Jamal",
+        discovery = client.discover_contributed_repositories(
+            developer="user",
             start_date=date(2026, 1, 1),
             end_date=date(2026, 3, 31),
         )
+        repositories = list(discovery.repositories)
 
         self.assertEqual([repo.full_name for repo in repositories], ["workspace/api", "workspace/web"])
+        self.assertEqual(
+            [record["id"] for record in discovery.pull_requests_by_repository[repositories[0].key]],
+            [10, 11],
+        )
+        self.assertEqual(
+            [record["id"] for record in discovery.pull_requests_by_repository[repositories[1].key]],
+            [12],
+        )
         first_url = mock_get_page.call_args_list[0].args[0]
         self.assertIn("/workspaces/workspace/pullrequests/%7Buser-uuid%7D", first_url)
         self.assertIn("state=MERGED", first_url)

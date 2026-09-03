@@ -138,6 +138,7 @@ class ContributionDetailDialog(QDialog):
 
 class ContributionHistoryTab(QWidget):
     progressUpdated = pyqtSignal(str)
+    partialResultReady = pyqtSignal(object)
     COLUMN_KEYS = [
         "date",
         "repository",
@@ -183,11 +184,20 @@ class ContributionHistoryTab(QWidget):
         self._defaults_initialized = False
         self._query_started_at = 0.0
         self._busy_status_prefix = "Running…"
+        self._query_completion_status = ""
+        self._streaming_query_active = False
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed_status)
+        self._partial_render_timer = QTimer(self)
+        self._partial_render_timer.setSingleShot(True)
+        self._partial_render_timer.setInterval(150)
+        self._partial_render_timer.timeout.connect(self._flush_partial_result)
+        self._pending_partial_payload = None
         self.progressUpdated.connect(self._on_progress_update)
+        self.partialResultReady.connect(self._on_partial_result)
         self._developer_suggestions_loading = False
+        self._developer_suggestion_token: Optional[CancelToken] = None
         self._default_developer = ""
 
         self._build_ui()
@@ -457,6 +467,8 @@ class ContributionHistoryTab(QWidget):
         self._on_scope_mode_changed()
 
     def apply_provider_context(self):
+        if self._developer_suggestion_token:
+            self._developer_suggestion_token.cancel()
         self.provider = build_provider_client(self.config)
         self.scope_manager = ScopeManager(self.config, self.provider)
         self.history_service = ContributionHistoryService(self.provider, self.scope_manager)
@@ -482,6 +494,8 @@ class ContributionHistoryTab(QWidget):
         self._load_scope_repositories(force_refresh=False, silent=True)
 
     def run_query(self):
+        if self._developer_suggestion_token:
+            self._developer_suggestion_token.cancel()
         self._save_persisted_state()
         query = self._build_query()
         if query.scope_type == "custom_repos" and not (query.scope_repositories or ()):
@@ -492,6 +506,15 @@ class ContributionHistoryTab(QWidget):
             )
             return
         self.cancel_token = CancelToken()
+        self._query_completion_status = ""
+        self._streaming_query_active = True
+        self._pending_partial_payload = None
+        self.current_result = None
+        self.results_table.setRowCount(0)
+        self.total_prs_label.setText("0")
+        self.total_commits_label.setText("0")
+        self.repo_count_label.setText("0")
+        self.fully_scanned_label.setText("0/0")
         self._set_busy(
             True,
             "Running contribution query. Large scopes may take longer; you can cancel anytime.",
@@ -502,12 +525,23 @@ class ContributionHistoryTab(QWidget):
             return self.history_service.execute_query(
                 query,
                 progress_callback=self.progressUpdated.emit,
+                partial_result_callback=lambda result, completed, total: (
+                    self.partialResultReady.emit((result, completed, total))
+                ),
                 cancel_token=self.cancel_token,
             )
 
         def on_result(result: ContributionHistoryResult):
+            self._streaming_query_active = False
+            self._partial_render_timer.stop()
+            self._pending_partial_payload = None
             self.current_result = result
             self._render_result(result)
+            elapsed = int(max(0.0, time.monotonic() - self._query_started_at))
+            metrics = ""
+            if " • " in self._busy_status_prefix:
+                metrics = " • " + self._busy_status_prefix.split(" • ", 1)[1]
+            self._query_completion_status = f"Completed in {elapsed}s{metrics}"
             if result.partial_errors:
                 QMessageBox.warning(
                     self,
@@ -535,6 +569,10 @@ class ContributionHistoryTab(QWidget):
                 )
 
         def on_error(exc: Exception):
+            self._streaming_query_active = False
+            self._partial_render_timer.stop()
+            self._pending_partial_payload = None
+            self._query_completion_status = "Query failed"
             QMessageBox.critical(self, "Contribution History", str(exc))
 
         self.task_runner.run(
@@ -542,7 +580,10 @@ class ContributionHistoryTab(QWidget):
             description="Contribution History Query",
             on_result=on_result,
             on_error=on_error,
-            on_finished=lambda: self._set_busy(False, "Ready"),
+            on_finished=lambda: self._set_busy(
+                False,
+                self._query_completion_status or "Ready",
+            ),
         )
 
     def cancel_query(self):
@@ -827,6 +868,25 @@ class ContributionHistoryTab(QWidget):
         self._busy_status_prefix = text
         self.status_label.setText(text)
 
+    def _on_partial_result(self, payload):
+        if not self.cancel_token or not self._streaming_query_active:
+            return
+        self._pending_partial_payload = payload
+        if not self._partial_render_timer.isActive():
+            self._partial_render_timer.start()
+
+    def _flush_partial_result(self):
+        if not self._streaming_query_active or not self._pending_partial_payload:
+            return
+        payload = self._pending_partial_payload
+        self._pending_partial_payload = None
+        result, completed, total = payload
+        self.current_result = result
+        self._render_result(result)
+        failed_count = len(result.partial_errors)
+        successful = max(0, completed - failed_count)
+        self.fully_scanned_label.setText(f"{successful}/{total}")
+
     def _update_elapsed_status(self):
         if not self.cancel_token:
             return
@@ -1065,6 +1125,8 @@ class ContributionHistoryTab(QWidget):
         if self._developer_suggestions_loading:
             return
         self._developer_suggestions_loading = True
+        suggestion_token = CancelToken()
+        self._developer_suggestion_token = suggestion_token
         current_text = self.developer_combo.currentText().strip()
         self._set_status_if_idle("Loading developer suggestions…")
 
@@ -1087,7 +1149,13 @@ class ContributionHistoryTab(QWidget):
             seen: set[str] = set()
             candidates: list[str] = []
             for repository in repositories:
-                for item in self.provider.list_developer_candidates(repository, limit=40):
+                if suggestion_token.is_cancelled():
+                    break
+                for item in self.provider.list_developer_candidates(
+                    repository,
+                    limit=40,
+                    cancel_check=suggestion_token.is_cancelled,
+                ):
                     candidate = (item or "").strip()
                     key = candidate.lower()
                     if not candidate or key in seen:
@@ -1097,6 +1165,8 @@ class ContributionHistoryTab(QWidget):
             return sorted(candidates, key=lambda value: value.lower())
 
         def on_result(candidates: list[str]):
+            if suggestion_token.is_cancelled():
+                return
             live_text = self.developer_combo.currentText().strip() or current_text
             if live_text:
                 self._set_developer_text(live_text)
@@ -1106,6 +1176,8 @@ class ContributionHistoryTab(QWidget):
             )
 
         def on_error(_exc: Exception):
+            if suggestion_token.is_cancelled():
+                return
             live_text = self.developer_combo.currentText().strip() or current_text
             if live_text:
                 self._set_developer_text(live_text)
@@ -1113,7 +1185,9 @@ class ContributionHistoryTab(QWidget):
             self._set_status_if_idle("Developer suggestions unavailable")
 
         def on_finished():
-            self._developer_suggestions_loading = False
+            if self._developer_suggestion_token is suggestion_token:
+                self._developer_suggestions_loading = False
+                self._developer_suggestion_token = None
 
         self.task_runner.run(
             task,

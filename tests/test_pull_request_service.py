@@ -189,6 +189,265 @@ class PullRequestServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ticket id"):
             self.service.find_pull_requests_by_ticket([self.repo], "no ticket here")
 
+    @patch("services.pull_request_service.requests.get")
+    def test_get_pull_request_comments_bitbucket(self, mock_get):
+        import tempfile
+        import os
+
+        bb_repo = {
+            "provider": "bitbucket",
+            "id": "bb-1",
+            "owner": "workspace",
+            "slug": "sample-repo",
+            "local_dir": "",
+        }
+
+        # 1. PR metadata response
+        pr_response = MagicMock()
+        pr_response.json.return_value = {
+            "id": 42,
+            "title": "Add auth service",
+            "state": "OPEN",
+            "author": {"display_name": "Ameer", "username": "ajamal"},
+            "source": {"branch": {"name": "feature/auth"}},
+            "destination": {"branch": {"name": "main"}},
+            "links": {"html": {"href": "https://bitbucket.org/workspace/sample-repo/pull-requests/42"}},
+        }
+
+        # 2. PR comments response
+        comments_response = MagicMock()
+        comments_response.json.return_value = {
+            "values": [
+                {
+                    "id": 101,
+                    "deleted": False,
+                    "user": {"display_name": "Alice", "nickname": "alice"},
+                    "content": {"raw": "Please add null check"},
+                    "created_on": "2026-02-01T10:00:00Z",
+                    "updated_on": "2026-02-01T10:00:00Z",
+                    "inline": {"path": "src/auth.py", "to": 5, "from": None, "outdated": False},
+                    "links": {"html": {"href": "https://bitbucket.org/comment/101"}},
+                },
+                {
+                    "id": 102,
+                    "parent": {"id": 101},
+                    "deleted": False,
+                    "user": {"display_name": "Bob", "nickname": "bob"},
+                    "content": {"raw": "Done in latest commit"},
+                    "created_on": "2026-02-01T10:15:00Z",
+                    "updated_on": "2026-02-01T10:15:00Z",
+                    "inline": {"path": "src/auth.py", "to": 5, "from": None, "outdated": False},
+                    "links": {"html": {"href": "https://bitbucket.org/comment/102"}},
+                },
+                {
+                    "id": 103,
+                    "deleted": False,
+                    "user": {"display_name": "Alice", "nickname": "alice"},
+                    "content": {"raw": "Overall looks great!"},
+                    "created_on": "2026-02-01T11:00:00Z",
+                    "updated_on": "2026-02-01T11:00:00Z",
+                    "inline": None,
+                    "resolution": {"resolved_by": {"display_name": "Alice"}, "resolved_on": "2026-02-01T11:05:00Z"},
+                    "links": {"html": {"href": "https://bitbucket.org/comment/103"}},
+                },
+            ],
+            "next": None,
+        }
+
+        mock_get.side_effect = [pr_response, comments_response]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_dir = os.path.join(tmpdir, "src")
+            os.makedirs(src_dir)
+            with open(os.path.join(src_dir, "auth.py"), "w") as f:
+                for i in range(1, 10):
+                    f.write(f"def line_{i}():\n    pass\n")
+
+            # Call with code context from local checkout
+            result = self.service.get_pull_request_comments(
+                bb_repo,
+                42,
+                repo_dir=tmpdir,
+                include_code_context=True,
+            )
+
+            self.assertEqual(result["summary"]["total_comments"], 3)
+            self.assertEqual(result["summary"]["total_threads"], 2)
+            self.assertEqual(result["summary"]["unresolved_threads"], 1)
+            self.assertEqual(result["summary"]["resolved_threads"], 1)
+            self.assertEqual(result["summary"]["inline_threads"], 1)
+            self.assertEqual(result["summary"]["general_threads"], 1)
+
+            # Check thread 1 structure
+            thread1 = result["threads"][0]
+            self.assertEqual(thread1["thread_id"], 101)
+            self.assertEqual(thread1["file_path"], "src/auth.py")
+            self.assertEqual(thread1["line"], 5)
+            self.assertFalse(thread1["resolved"])
+            self.assertEqual(thread1["reply_count"], 1)
+            self.assertEqual(thread1["replies"][0]["body"], "Done in latest commit")
+            self.assertIn(">", thread1["code_snippet"])
+            self.assertIn("line_3", thread1["code_snippet"])
+
+            # Check thread 2 (general, resolved)
+            thread2 = result["threads"][1]
+            self.assertEqual(thread2["thread_id"], 103)
+            self.assertTrue(thread2["resolved"])
+            self.assertEqual(thread2["resolved_by"], "Alice")
+
+            # Formatted summary checks
+            self.assertIn("# PR #42: Add auth service", result["formatted_summary"])
+            self.assertIn("Unresolved Threads (1)", result["formatted_summary"])
+            self.assertIn("Resolved Threads (1)", result["formatted_summary"])
+            self.assertIn("Please add null check", result["formatted_summary"])
+
+            # Test filter unresolved_only
+            mock_get.side_effect = [pr_response, comments_response]
+            unresolved_res = self.service.get_pull_request_comments(
+                bb_repo,
+                42,
+                unresolved_only=True,
+            )
+            self.assertEqual(len(unresolved_res["threads"]), 1)
+            self.assertEqual(unresolved_res["threads"][0]["thread_id"], 101)
+
+            # Test filter comment_type="inline"
+            mock_get.side_effect = [pr_response, comments_response]
+            inline_res = self.service.get_pull_request_comments(
+                bb_repo,
+                42,
+                comment_type="inline",
+            )
+            self.assertEqual(len(inline_res["threads"]), 1)
+            self.assertEqual(inline_res["threads"][0]["file_path"], "src/auth.py")
+
+    @patch("services.pull_request_service.requests.post")
+    @patch("services.pull_request_service.requests.get")
+    def test_get_pull_request_comments_github(self, mock_get, mock_post):
+        # 1. PR metadata
+        pr_response = MagicMock()
+        pr_response.json.return_value = {
+            "number": 10,
+            "title": "Fix memory leak",
+            "state": "open",
+            "merged_at": None,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "head": {"ref": "feature/leak", "sha": "abc"},
+            "base": {"ref": "main", "sha": "def"},
+            "user": {"login": "octocat"},
+            "html_url": "https://github.com/openai/demo/pull/10",
+            "body": "Fixes leak in cache",
+        }
+        pr_response.headers = {}
+
+        # 2. Review comments (inline)
+        review_comments_response = MagicMock()
+        review_comments_response.json.return_value = [
+            {
+                "id": 201,
+                "path": "cache.py",
+                "line": 40,
+                "original_line": 40,
+                "side": "RIGHT",
+                "diff_hunk": "@@ -38,5 +38,6 @@\n def evict():\n+    del self._items[k]",
+                "user": {"login": "reviewer1"},
+                "body": "Ensure key exists before del",
+                "created_at": "2026-02-01T12:00:00Z",
+                "updated_at": "2026-02-01T12:00:00Z",
+                "html_url": "https://github.com/openai/demo/pull/10#discussion_r201",
+                "in_reply_to_id": None,
+                "position": 1,
+            },
+            {
+                "id": 202,
+                "path": "cache.py",
+                "line": 40,
+                "original_line": 40,
+                "side": "RIGHT",
+                "diff_hunk": "@@ -38,5 +38,6 @@\n def evict():\n+    del self._items[k]",
+                "user": {"login": "octocat"},
+                "body": "Good point, using .pop(k, None)",
+                "created_at": "2026-02-01T12:10:00Z",
+                "updated_at": "2026-02-01T12:10:00Z",
+                "html_url": "https://github.com/openai/demo/pull/10#discussion_r202",
+                "in_reply_to_id": 201,
+                "position": 1,
+            },
+        ]
+        review_comments_response.headers = {}
+
+        # 3. Issue comments (general)
+        issue_comments_response = MagicMock()
+        issue_comments_response.json.return_value = [
+            {
+                "id": 301,
+                "user": {"login": "qa_bot"},
+                "body": "CI passed successfully",
+                "created_at": "2026-02-01T12:05:00Z",
+                "updated_at": "2026-02-01T12:05:00Z",
+                "html_url": "https://github.com/openai/demo/pull/10#issuecomment-301",
+            }
+        ]
+        issue_comments_response.headers = {}
+
+        # 4. Reviews
+        reviews_response = MagicMock()
+        reviews_response.json.return_value = [
+            {
+                "id": 401,
+                "user": {"login": "reviewer1"},
+                "body": "Looks good once the pop check is addressed",
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-02-01T12:15:00Z",
+                "html_url": "https://github.com/openai/demo/pull/10#pullrequestreview-401",
+            }
+        ]
+        reviews_response.headers = {}
+
+        mock_get.side_effect = [
+            pr_response,
+            review_comments_response,
+            issue_comments_response,
+            reviews_response,
+        ]
+
+        # Mock GraphQL response for resolution status
+        graphql_response = MagicMock()
+        graphql_response.status_code = 200
+        graphql_response.json.return_value = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-1",
+                                    "isResolved": True,
+                                    "isOutdated": False,
+                                    "comments": {"nodes": [{"databaseId": 201}, {"databaseId": 202}]},
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        mock_post.return_value = graphql_response
+
+        result = self.service.get_pull_request_comments(self.repo, 10)
+
+        self.assertEqual(result["summary"]["total_comments"], 4)
+        self.assertEqual(result["summary"]["total_threads"], 3)
+        self.assertEqual(result["summary"]["resolved_threads"], 1)
+
+        # Thread 201 should be marked resolved via GraphQL
+        inline_thread = next(t for t in result["threads"] if t["thread_id"] == 201)
+        self.assertTrue(inline_thread["resolved"])
+        self.assertEqual(inline_thread["file_path"], "cache.py")
+        self.assertEqual(inline_thread["reply_count"], 1)
+        self.assertIn("Ensure key exists", inline_thread["root_comment"]["body"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
