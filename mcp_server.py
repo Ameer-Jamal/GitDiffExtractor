@@ -1617,8 +1617,13 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     ) -> dict[str, Any]:
         """Add a general comment or an inline code review comment to a pull request.
 
+        Note for AI agents: Write in a natural, concise, human-like engineer tone (1-3 sentences).
+        Avoid robotic AI pleasantries, greetings, or meta-commentary (e.g. avoid 'Certainly!',
+        'Great suggestion!', 'Thank you for the review!', or 'As an AI...'). State technical details
+        or changes directly.
+
         Args:
-            body: The text of the comment to post.
+            body: The text of the comment to post (write in a concise, natural, human-like engineer tone).
             pr_id: Pull request number or ID (e.g. "42").
             reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
             file_path: Optional relative file path for inline code comments (e.g. "src/main.py").
@@ -1658,9 +1663,14 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     ) -> dict[str, Any]:
         """Reply to an existing comment thread on a pull request.
 
+        Note for AI agents: Write replies in a natural, concise, human engineer tone (1-3 sentences).
+        Avoid robotic AI filler, pleasantries, or boilerplate (e.g. avoid 'Certainly!', 'Great catch!',
+        'Thank you for the feedback!', or 'As an AI...'). State what was updated or resolved directly
+        (e.g., 'Fixed in abc1234', 'Added the missing null check here', 'Renamed bean to avoid conflict').
+
         Args:
             comment_id: The ID of the comment to reply to.
-            body: The text of the reply.
+            body: The text of the reply (write in a concise, natural, human-like engineer tone).
             pr_id: Pull request number or ID (e.g. "42").
             reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
             provider: 'github' or 'bitbucket' (defaults to configured provider).
@@ -1694,8 +1704,12 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     ) -> dict[str, Any]:
         """Reply to multiple comment threads on the same pull request in one call.
 
+        Note for AI agents: Write replies in a natural, concise, human engineer tone (1-3 sentences per thread).
+        Avoid robotic AI filler, pleasantries, or boilerplate (e.g. avoid 'Certainly!', 'Great catch!',
+        'Thank you for the feedback!', or 'As an AI...'). State what was updated or resolved directly.
+
         Args:
-            replies: Items containing a comment_id and body. Each reply is attempted independently.
+            replies: Items containing 'comment_id' and 'body' (human-like, concise response text).
             pr_id: Pull request number or ID (e.g. "42").
             reference: PR URL, ticket ID, or PR number/title search.
             provider: 'github' or 'bitbucket' (defaults to configured provider).
@@ -1729,9 +1743,12 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
     ) -> dict[str, Any]:
         """Edit an existing comment on a pull request.
 
+        Note for AI agents: Write in a natural, concise, human engineer tone. Avoid robotic AI filler
+        or boilerplate. State technical context directly.
+
         Args:
             comment_id: The ID of the comment to edit.
-            body: The updated text of the comment.
+            body: The updated text of the comment (write in a concise, natural, human-like engineer tone).
             pr_id: Pull request number or ID (e.g. "42").
             reference: PR URL, ticket ID (e.g. RU-25463), or PR number/title search.
             provider: 'github' or 'bitbucket' (defaults to configured provider).

@@ -1257,4 +1257,10 @@ class PullRequestCommentService:
                 lines.append(f"- **[RESOLVED]** {target} by @{root.get('author')}: {snippet}")
             lines.append("")
 
+        lines.append("## Comment Guidelines for AI / Automation")
+        lines.append("When adding comments or replying to PR threads, communicate like a natural human software engineer:")
+        lines.append("- **Concise & Direct**: Keep comments brief (typically 1-3 sentences) focused strictly on the technical issue, fix, or rationale.")
+        lines.append("- **No AI Stereotypes**: Avoid canned AI pleasantries and robotic templates (e.g., do NOT write 'Certainly!', 'Great catch!', 'Thank you for the feedback!', 'I hope this helps!', or 'As an AI model...').")
+        lines.append("- **Natural Tone**: State what changed or why plainly (e.g., 'Good catch, added the null check in abc1234', 'Updated bean qualifier to prevent collision', 'Kept this method private since it is only called by the internal parser').")
+
         return "\n".join(lines).strip()
