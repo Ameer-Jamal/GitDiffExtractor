@@ -6,10 +6,21 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Tag / Release version (e.g. v1.0.0)'
-        required: true
-        default: 'v1.0.0'
+      bump_type:
+        description: 'Version bump strategy'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - none
+          - custom
+        default: auto
+      custom_version:
+        description: 'Explicit version (e.g. 1.0.0, required only if bump_type is custom)'
+        required: false
+        default: ''
       draft:
         description: 'Create as a draft release'
         type: boolean
@@ -24,12 +35,75 @@ permissions:
   id-token: write
 
 jobs:
+  prepare-release:
+    name: Determine & Bump Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compute & Apply Version Bump
+        id: bump
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            echo "Triggered by tag push: $TAG ($VERSION)"
+            python .github/scripts/bump_version.py --set-version "$VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          else
+            BUMP_TYPE="${{ github.event.inputs.bump_type }}"
+            CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
+            
+            if [ "$BUMP_TYPE" = "custom" ]; then
+              if [ -z "$CUSTOM_VERSION" ]; then
+                echo "Error: custom_version must be provided when bump_type is 'custom'"
+                exit 1
+              fi
+              python .github/scripts/bump_version.py --set-version "$CUSTOM_VERSION"
+            else
+              python .github/scripts/bump_version.py --type "$BUMP_TYPE"
+            fi
+            
+            VERSION=$(cat pyproject.toml | grep -m1 '^version =' | cut -d '"' -f2)
+            TAG="v$VERSION"
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            if ! git diff --quiet pyproject.toml repolens.spec; then
+              git add pyproject.toml repolens.spec
+              git commit -m "chore(release): bump version to $TAG [skip ci]"
+              git push origin HEAD:${{ github.ref_name }}
+            fi
+            
+            if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+              git tag "$TAG"
+              git push origin "$TAG"
+            fi
+          fi
+
   build-wheels:
     name: Build Python Package (sdist & wheel)
+    needs: prepare-release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,6 +132,7 @@ jobs:
 
   build-desktop:
     name: Build Desktop App (${{ matrix.os }})
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -73,6 +148,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -121,11 +198,13 @@ jobs:
 
   create-release:
     name: Publish GitHub Release
-    needs: [build-wheels, build-desktop]
+    needs: [prepare-release, build-wheels, build-desktop]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Download Python packages
         uses: actions/download-artifact@v4
@@ -151,20 +230,11 @@ jobs:
           name: desktop-ubuntu-latest
           path: release-assets
 
-      - name: Determine Release Tag
-        id: vars
-        run: |
-          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
-            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.vars.outputs.tag }}
-          name: Release ${{ steps.vars.outputs.tag }}
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: Release ${{ needs.prepare-release.outputs.tag }}
           draft: ${{ github.event.inputs.draft || false }}
           prerelease: ${{ github.event.inputs.prerelease || false }}
           generate_release_notes: true
