@@ -45,9 +45,9 @@ repolens-mcp = "mcp_server:main"
 repolens-install-mcp = "install_mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/Ameer-Jamal/GitDiffExtractor"
-Repository = "https://github.com/Ameer-Jamal/GitDiffExtractor"
-Issues = "https://github.com/Ameer-Jamal/GitDiffExtractor/issues"
+Homepage = "https://github.com/Ameer-Jamal/RepoLens"
+Repository = "https://github.com/Ameer-Jamal/RepoLens"
+Issues = "https://github.com/Ameer-Jamal/RepoLens/issues"
 
 [tool.setuptools]
 py-modules = [
