@@ -203,6 +203,27 @@ def test_create_pull_request(mock_backend):
     mock_create.assert_called_once()
 
 
+def test_create_pull_request_with_changes(mock_backend):
+    backend, _provider = mock_backend
+    with patch.object(backend.pr_patch_service, "create_pull_request_from_changes") as mock_create:
+        mock_create.return_value = {"number": 9, "url": "https://example.com/pr/9"}
+
+        result = backend.create_pull_request_with_changes(
+            title="Fix typo",
+            target_branch="main",
+            changes_json='[{"path": "README.md", "content": "hello\\n"}]',
+            repo_dir="/tmp/demo",
+        )
+
+    assert result["number"] == 9
+    mock_create.assert_called_once()
+    request = mock_create.call_args.args[1]
+    assert request.title == "Fix typo"
+    assert request.target_branch == "main"
+    assert len(request.files) == 1
+    assert request.files[0].path == "README.md"
+
+
 def test_update_pull_request(mock_backend):
     backend, _provider = mock_backend
     backend.resolve_repository.return_value = {

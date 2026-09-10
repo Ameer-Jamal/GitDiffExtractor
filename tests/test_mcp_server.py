@@ -54,6 +54,14 @@ class _FakeBackend:
     def create_pull_request(self, **kwargs):
         return {"url": "https://example.com/pr/1", "number": 1, "draft": kwargs.get("draft", False)}
 
+    def create_pull_request_with_changes(self, **kwargs):
+        return {
+            "url": "https://example.com/pr/2",
+            "number": 2,
+            "source_branch": kwargs.get("source_branch", ""),
+            "changed_paths": ["src/app.py"],
+        }
+
     def update_pull_request(self, **kwargs):
         return {"url": "https://example.com/pr/1", "number": 1, "title": kwargs.get("title", "")}
 
@@ -138,6 +146,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("get_ticket_diffs", tool_names)
             self.assertIn("list_my_pull_requests", tool_names)
             self.assertIn("create_pull_request", tool_names)
+            self.assertIn("create_pull_request_with_changes", tool_names)
             self.assertIn("update_pull_request", tool_names)
             self.assertIn("get_git_repository_context", tool_names)
             self.assertIn("get_pr_context", tool_names)
@@ -170,6 +179,20 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 {"title": "Test PR", "source_branch": "feature/test", "target_branch": "main", "repo_dir": "/tmp/demo"},
             )
             self.assertEqual(create_pr_result.structuredContent["number"], 1)
+
+            create_pr_changes_result = await session.call_tool(
+                "create_pull_request_with_changes",
+                {
+                    "title": "Test PR from changes",
+                    "target_branch": "main",
+                    "changes_json": '[{"path": "src/app.py", "content": "print(1)"}]',
+                    "repo_dir": "/tmp/demo",
+                },
+            )
+            self.assertEqual(create_pr_changes_result.structuredContent["number"], 2)
+            self.assertEqual(
+                create_pr_changes_result.structuredContent["changed_paths"], ["src/app.py"]
+            )
 
             update_pr_result = await session.call_tool(
                 "update_pull_request",

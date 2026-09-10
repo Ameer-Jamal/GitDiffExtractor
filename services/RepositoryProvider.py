@@ -368,10 +368,51 @@ class RepositoryProvider:
         netloc = f"{safe_token}@{host}{port}"
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
-    @staticmethod
-    def _run_git(command: List[str], cwd: Optional[str] = None) -> None:
+    @classmethod
+    def push_branch(cls, repo: dict, config, *, local_dir: str, branch: str) -> None:
+        """Push an existing local branch using temporary request-scoped credentials.
+
+        The credential-free origin URL is restored afterwards so tokens are never
+        persisted in the checkout's Git config.
+        """
+        branch = (branch or "").strip()
+        if not branch:
+            raise RepositoryProviderError("A branch name is required to push.")
+
+        clone_url = (repo.get("clone_url") or "").strip()
+        provider = (repo.get("provider") or "").lower()
+        adapter = cls._adapter(provider) if provider else None
+        clean_url = cls._strip_userinfo(clone_url) if clone_url else ""
+        authenticated_url = (
+            adapter.authenticated_clone_url(clean_url, config)
+            if adapter and clean_url
+            else ""
+        )
+
+        if authenticated_url:
+            cls._run_git(["git", "remote", "set-url", "origin", authenticated_url], cwd=local_dir)
         try:
-            subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
+            cls._run_git(["git", "push", "-u", "origin", branch], cwd=local_dir)
+        finally:
+            if authenticated_url:
+                cls._run_git(["git", "remote", "set-url", "origin", clean_url], cwd=local_dir)
+
+    @staticmethod
+    def run_git(
+        command: List[str],
+        cwd: Optional[str] = None,
+        input_text: Optional[str] = None,
+        check: bool = True,
+    ) -> None:
+        try:
+            subprocess.run(
+                command,
+                cwd=cwd,
+                check=check,
+                capture_output=True,
+                text=True,
+                input=input_text,
+            )
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
             stdout = (exc.stdout or "").strip()
@@ -379,7 +420,7 @@ class RepositoryProvider:
             raise RepositoryProviderError(f"Git command failed: {details}") from exc
 
     @staticmethod
-    def _run_git_output(command: List[str], cwd: Optional[str] = None) -> str:
+    def git_output(command: List[str], cwd: Optional[str] = None) -> str:
         try:
             result = subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
@@ -388,3 +429,11 @@ class RepositoryProvider:
             details = stderr or stdout or str(exc)
             raise RepositoryProviderError(f"Git command failed: {details}") from exc
         return result.stdout
+
+    @staticmethod
+    def _run_git(command: List[str], cwd: Optional[str] = None) -> None:
+        RepositoryProvider.run_git(command, cwd=cwd)
+
+    @staticmethod
+    def _run_git_output(command: List[str], cwd: Optional[str] = None) -> str:
+        return RepositoryProvider.git_output(command, cwd=cwd)
