@@ -38,7 +38,7 @@ Git providers already contain the context an AI needs, but that context is scatt
 
 ### **Option 1: Download Standalone Desktop App (No Python Required)**
 
-Download pre-built desktop binaries directly from [**GitHub Releases**](https://github.com/Ameer-Jamal/GitDiffExtractor/releases):
+Download pre-built desktop binaries directly from [**GitHub Releases**](https://github.com/Ameer-Jamal/RepoLens/releases):
 
 * 🍏 **macOS**: Download `RepoLens-macos.zip` (contains `RepoLens.app`). Unzip and move to `/Applications`.
 * 🪟 **Windows**: Download `RepoLens-windows-x64.zip`. Unzip and run `RepoLens.exe`.
@@ -54,10 +54,10 @@ Install RepoLens as a Python package with global entry points:
 
 ```bash
 # Install directly from GitHub
-pip install git+https://github.com/Ameer-Jamal/GitDiffExtractor.git
+pip install git+https://github.com/Ameer-Jamal/RepoLens.git
 
 # Or install the latest release wheel
-pip install https://github.com/Ameer-Jamal/GitDiffExtractor/releases/latest/download/repolens-1.0.0-py3-none-any.whl
+pip install https://github.com/Ameer-Jamal/RepoLens/releases/latest/download/repolens-1.0.0-py3-none-any.whl
 ```
 
 This installs three CLI commands:
@@ -70,8 +70,8 @@ This installs three CLI commands:
 ### **Option 3: Run from Source**
 
 ```bash
-git clone https://github.com/Ameer-Jamal/GitDiffExtractor.git
-cd GitDiffExtractor
+git clone https://github.com/Ameer-Jamal/RepoLens.git
+cd RepoLens
 pip install -r requirements.txt
 python3 main.py
 ```
