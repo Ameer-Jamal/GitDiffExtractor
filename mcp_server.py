@@ -18,6 +18,7 @@ from services.provider_api import build_provider_client
 from services.pull_request_service import PullRequestService
 from services.pull_request_comment_service import PullRequestCommentService
 from services.pr_creation_service import PullRequestCreateRequest, PullRequestCreationService, PullRequestUpdateRequest
+from services.pr_patch_service import PullRequestFromChangesRequest, PullRequestPatchService
 from services.scope_manager import ScopeManager
 
 try:
@@ -51,6 +52,7 @@ class RepoLensMCPBackend:
         self.pr_service = PullRequestService(self.config)
         self.pr_comment_service = PullRequestCommentService(self.config, pr_service=self.pr_service)
         self.pr_creation_service = PullRequestCreationService(self.config)
+        self.pr_patch_service = PullRequestPatchService(self.config, creation_service=self.pr_creation_service)
         self.git_context_service = GitContextService()
         self.diff_service = DiffService()
 
@@ -509,6 +511,45 @@ class RepoLensMCPBackend:
                 source_branch=source_branch,
                 target_branch=target_branch,
                 draft=draft,
+            ),
+        )
+
+    def create_pull_request_with_changes(
+        self,
+        *,
+        title: str,
+        target_branch: str,
+        changes_json: str = "",
+        patch: str = "",
+        description: str = "",
+        source_branch: str = "",
+        commit_message: str = "",
+        draft: bool = False,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        repo = self.resolve_repository(
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+            allow_direct=True,
+        )
+        return self.pr_patch_service.create_pull_request_from_changes(
+            repo,
+            PullRequestFromChangesRequest(
+                title=title,
+                target_branch=target_branch,
+                source_branch=source_branch,
+                description=description,
+                commit_message=commit_message,
+                draft=draft,
+                files=PullRequestPatchService.parse_changes(changes_json),
+                patch=patch,
             ),
         )
 
@@ -1911,6 +1952,61 @@ def create_mcp_server(backend: RepoLensMCPBackend | None = None):
             source_branch=source_branch,
             target_branch=target_branch,
             description=description,
+            draft=draft,
+            provider=provider,
+            workspace=workspace,
+            slug=slug,
+            scope=scope,
+            repo_dir=repo_dir,
+        )
+
+    @app.tool()
+    def create_pull_request_with_changes(
+        title: str,
+        target_branch: str,
+        changes_json: str = "",
+        patch: str = "",
+        description: str = "",
+        source_branch: str = "",
+        commit_message: str = "",
+        draft: bool = False,
+        provider: str = "",
+        workspace: str = "",
+        slug: str = "",
+        scope: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        """Create a new branch with local changes, push it, and open a pull request.
+
+        Use this to open small PRs quickly without running Git commands yourself.
+        Provide file contents through changes_json (a JSON array) and/or a unified
+        diff through patch. The target branch is the base; a new source branch is
+        created from it, changes are committed locally, the branch is pushed, and
+        the pull request is opened.
+
+        Args:
+            title: Pull request title.
+            target_branch: Base branch the pull request targets (e.g. "main").
+            changes_json: JSON array of file operations, each {"path": "...", "content": "...", "encoding": "utf-8", "delete": false}. Use "delete": true to remove a file. Supports encoding "base64" for binary content.
+            patch: Optional unified diff applied with `git apply` after the file changes.
+            description: Pull request description/body.
+            source_branch: New branch name to create. Defaults to a generated repolens/<title>-<id> branch.
+            commit_message: Commit message. Defaults to the pull request title.
+            draft: Open the pull request as a draft when the provider supports it.
+            provider: 'github' or 'bitbucket' (defaults to configured provider).
+            workspace: Repository owner/workspace.
+            slug: Repository slug/name.
+            scope: Repo scope ('active', 'selected', or 'specific:<owner>/<slug>').
+            repo_dir: Local repository directory path.
+        """
+        return backend.create_pull_request_with_changes(
+            title=title,
+            target_branch=target_branch,
+            changes_json=changes_json,
+            patch=patch,
+            description=description,
+            source_branch=source_branch,
+            commit_message=commit_message,
             draft=draft,
             provider=provider,
             workspace=workspace,
